@@ -1,6 +1,8 @@
+from __future__ import annotations
 from lark import Lark, ast_utils, Transformer, Token
 from dataclasses import dataclass
 from enum import Enum
+import random
 
 import sys
 import argparse
@@ -33,7 +35,6 @@ class RelOp(Op):
 
 
 class UnOp(Op):
-    Not = "!"
     Neg = "-"
     Pos = "+"
 
@@ -210,7 +211,7 @@ class If(IRNode):
 class Return(IRNode):
     """ Returning a value. """
 
-    name: Token
+    name: Token | None
 
     def __init__(self, *args):
         if len(args) == 1:
@@ -236,7 +237,7 @@ class Arg(IRNode):
 class Call(IRNode):
     """ Calling a function. """
 
-    left: Token
+    left: Token | None
     right: Token
 
     def __init__(self, *args):
@@ -267,6 +268,39 @@ class Dec(IRNode):
     def __str__(self) -> str:
         return f"Dec {self.name} #{self.size}"
 
+@dataclass
+class La(IRNode):
+    """ Load address of a label """
+
+    dst: Token
+    label: Token
+
+    def __str__(self) -> str:
+        return f"{self.dst} := &{self.label}"
+
+@dataclass
+class Global(IRNode):
+    """ Define a global variable """
+
+    name: Token
+
+    def __init__(self, name):
+        self.name = name
+
+    def __str__(self) -> str:
+        return f"Global {self.name}:"
+    
+@dataclass
+class Fillw(IRNode):
+    """ Fill word to current address """
+
+    value: int
+
+    def __init__(self, token):
+        self.value = int(token.value)
+
+    def __str__(self) -> str:
+        return f".word #{self.value}"
 
 class ToIR(Transformer):
     def start(self, args): return args
@@ -298,8 +332,8 @@ start: instruction*
     | "*" NAME "=" NAME -> store
     | NAME "=" "*" NAME -> deref
     | NAME "=" NAME binop NAME -> binary
-    | NAME "=" NAME binop "#" DEC_NUMBER -> binaryi
-    | NAME "=" "#" DEC_NUMBER -> li
+    | NAME "=" NAME binop "#" SIGNED_INT -> binaryi
+    | NAME "=" "#" SIGNED_INT -> li
     | "PARAM" NAME -> param
     | "ARG" NAME -> arg
     | "RETURN" NAME -> return
@@ -307,7 +341,10 @@ start: instruction*
     | NAME "=" "CALL" NAME -> call
     | "CALL" NAME -> call
     | "FUNCTION" NAME ":" -> function
-    | "DEC" NAME "#" DEC_NUMBER -> dec
+    | "DEC" NAME "#" SIGNED_INT -> dec
+    | NAME "=" "&" NAME -> la
+    | "GLOBAL" NAME ":" -> global
+    | ".WORD" "#" SIGNED_INT -> fillw
 
 ?relop : "<" -> lt
     | ">" -> gt
@@ -323,10 +360,10 @@ start: instruction*
     | "%" -> mod
 
 ?unop : "-" -> neg
-    | "!" -> not
     | "+" -> pos
     
-%import python (NAME, DEC_NUMBER)
+%import python.NAME
+%import common.SIGNED_INT
 %import common.WS
 %import common.CPP_COMMENT
 %import common.C_COMMENT
@@ -360,7 +397,8 @@ class Environment:
 
     def __init__(self) -> None:
         self.env = {}
-        self.arrays = set()
+        self.arrays: set[Array] = set()
+        self.labels = {}
 
     def show(self):
         for k, v in self.env.items():
@@ -375,7 +413,7 @@ class Environment:
             else:
                 raise ValueError(f"Variable {key} is not defined.")
 
-    def __setitem__(self, key: str, value: int) -> None:
+    def __setitem__(self, key: str, value: int | FunctionFrame) -> None:
         self.env[key] = value
 
     def load(self, address: Token) -> int:
@@ -405,8 +443,9 @@ class Array:
     def __init__(self, start_address: int, size: int) -> None:
         self.start_address = start_address
         self.size = size
-        self.values = [0 for _ in range(size)]
+        self.values = [random.randint(1, 0xffff) for _ in range(size)]
 
+    @staticmethod
     def new(size: int) -> int:
         start_address = Array.HEAD
         array = Array(start_address, size//4) # 4 bytes per int
@@ -432,7 +471,7 @@ op2func = {
     BinOp.Add: lambda x, y: x + y,
     BinOp.Sub: lambda x, y: x - y,
     BinOp.Mul: lambda x, y: x * y,
-    BinOp.Div: lambda x, y: x // y,
+    BinOp.Div: lambda x, y: int(x / y),
     BinOp.Mod: lambda x, y: x % y,
     # relation op
     RelOp.Gt: lambda x, y: x > y,
@@ -442,7 +481,6 @@ op2func = {
     RelOp.Eq: lambda x, y: x == y,
     RelOp.Ne: lambda x, y: x != y,
     # unary op
-    UnOp.Not: lambda x: 1 if x == 0 else 0,
     UnOp.Neg: lambda x: -x,
     UnOp.Pos: lambda x: x,
 }
@@ -455,7 +493,7 @@ class FunctionFrame:
         self.codes = []
         self.env = Environment()
 
-    def new(self) -> 'FunctionFrame':
+    def new(self) -> FunctionFrame:
         new_frame = FunctionFrame(self.name)
         new_frame.codes = self.codes
         new_frame.labels = self.labels
@@ -496,8 +534,8 @@ class FunctionFrame:
                 case Li(label, value):
                     env[label] = value
                 # function definition and label is not code
-                case Function(_) | Label(_):
-                    pass
+                case Function(name) | Label(name):
+                    global_env.labels[name] = pc
                 case Goto(label):
                     if label not in self.labels:
                         raise ValueError(
@@ -518,12 +556,16 @@ class FunctionFrame:
                     env[dst] = params.pop(0)
                 case Call(dst, name):
                     if name == 'read':
-                        env[dst] = int(input())
+                        res = int(input())
+                        if dst is not None:
+                            env[dst] = res
                     elif name == 'write':
                         print(args[0])
                         args = []  # reset args
                     else:
-                        env[dst] = env[name].new().run(args)
+                        res = env[name].new().run(args)
+                        if dst is not None:
+                            env[dst] = res
                         args = []  # reset args
                 case If(left, op, right, label):
                     if op in op2func.keys():
@@ -539,6 +581,11 @@ class FunctionFrame:
                 case Deref(dst, src):  # x = * y
                     value = env.load(src)
                     env[dst] = value
+                case La(dst, label):
+                    if label not in global_env.labels:
+                        raise ValueError(
+                            f"Label {label} in function {self.name} is not defined.")
+                    env[dst] = global_env.labels[label]
                 case _:
                     raise NotImplementedError(f"{ir} is not implemented.")
         assert False, f"No return statement in function {self.name}."
@@ -558,16 +605,39 @@ class FunctionFrame:
 
 def build_function(irs: list[IRNode]) -> list[FunctionFrame]:
     frames = []
-    if len(irs) == 0 or not isinstance(irs[0], Function):
-        raise SyntaxError("IR should start with a FUNCTION.")
+    global_var: dict[str, list[int]] = {}
+    current_var = None
+    if len(irs) == 0 or not (isinstance(irs[0], Function) or isinstance(irs[0], Global)):
+        raise SyntaxError("IR should start with a FUNCTION or GLOBAL.")
     for ir in irs:
         if isinstance(ir, Function):
             frame = FunctionFrame(ir.name)
             frames.append(frame)
             global_env[ir.name] = frame
-        if isinstance(ir, Label):
+            frames[-1].add_code(ir)
+            current_var = None
+        elif isinstance(ir, Label):
             frames[-1].add_label(ir.label)
-        frames[-1].add_code(ir)
+            frames[-1].add_code(ir)
+        elif isinstance(ir, Global):
+            if frames:
+                raise SyntaxError("Global variable should be defined before function.")
+            global_var[ir.name] = []
+            current_var = ir.name
+        elif isinstance(ir, Fillw):
+            if current_var is None:
+                raise SyntaxError("No global variable to fill")
+            global_var[current_var].append(ir.value)
+        else:
+            frames[-1].add_code(ir)
+    for name, values in global_var.items():
+        address = Array.new(len(values) * 4)
+        for array in global_env.arrays:
+            if array.contain(address):
+                for i, value in enumerate(values):
+                    array.set(address + i * 4, value)
+                break
+        global_env.labels[name] = address
     return frames
 
 
