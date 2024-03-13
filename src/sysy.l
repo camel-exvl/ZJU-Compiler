@@ -56,9 +56,9 @@ blank [ \t\n]
 "int"           { return INT; }
 "void"          { return VOID; }
 
-{digit}+        { yylval.num = atoi(yytext); return INTCONST; }
 0[0-7]+         { yylval.num = strtol(yytext, NULL, 8); return INTCONST; }
 0[xX][0-9a-fA-F]+ { yylval.num = strtol(yytext, NULL, 16); return INTCONST; }
+{digit}+        { yylval.num = atoi(yytext); return INTCONST; }
 
 [a-zA-Z_][a-zA-Z0-9_]* { yylval.str = strdup(yytext); return IDENT; }
 
