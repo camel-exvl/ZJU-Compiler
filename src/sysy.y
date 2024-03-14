@@ -1,9 +1,18 @@
+%locations
+%define parse.error detailed
+%define parse.lac full
+
 %{
 #include <cstdio>
 void yyerror(const char *s);
 extern int yylex(void);
 #include "ast.h"
-BaseStmt *root;
+BaseStmt* root;
+bool errorFlag = false;
+
+extern int yylineno, yycolumn;
+extern char* lineptr;
+extern char* filename;
 %}
 
 %code requires {
@@ -91,13 +100,14 @@ InitVal : Exp { $$ = new InitVal($1, false); }
             | LBRACE InitValList RBRACE { $$ = new InitVal($2, true); }
 InitValList : { $$ = nullptr; }
             | InitVal { $$ = new InitValList(); $$->append($1); }
-            | InitValList COMMA InitVal { $$ = $1; $$->append($3); }
+            | InitVal COMMA InitValList { $$ = $3; $$->appendHead($1); }
 
 FuncDef : FuncType IDENT LPAREN FuncFParams RPAREN Block { $$ = new FuncDef($1, $2, $4, $6);}
             | BType IDENT LPAREN FuncFParams RPAREN Block { $$ = new FuncDef($1, $2, $4, $6); }
+            | FuncType IDENT LPAREN RPAREN Block { $$ = new FuncDef($1, $2, nullptr, $5); }
+            | BType IDENT LPAREN RPAREN Block { $$ = new FuncDef($1, $2, nullptr, $5); }
 FuncType : VOID { $$ = new Type("void"); }
-FuncFParams : { $$ = nullptr;}
-            | FuncFParam { $$ = new FuncFParams(); $$->append($1); }
+FuncFParams : FuncFParam { $$ = new FuncFParams(); $$->append($1); }
             | FuncFParams COMMA FuncFParam { $$ = $1; $$->append($3); }
 FuncFParam : BType IDENT { $$ = new FuncFParam($1, $2, nullptr); }
             | BType IDENT LBRACKET RBRACKET { $$ = new FuncFParam($1, $2, new FuncFArrParam()); }
@@ -118,6 +128,7 @@ Stmt : LVal ASSIGN Exp SEMICOLON { $$ = new AssignStmt($1, $3); }
         | WHILE LPAREN Cond RPAREN Stmt { $$ = new WhileStmt($3, $5); }
         | RETURN SEMICOLON { $$ = new ReturnStmt(); }
         | RETURN Exp SEMICOLON { $$ = new ReturnStmt($2); }
+        | error SEMICOLON { $$ = nullptr; }
 
 Exp : AddExp { $$ = $1; }
 Cond : LOrExp { $$ = $1; }
@@ -161,6 +172,11 @@ LOrExp : LAndExp { $$ = $1; }
 %%
 
 void yyerror(const char *s) {
-    printf("error: %s\n", s);
-    exit(1);
+    printf("%s:%d:%d: error: %s\n", filename, yylineno, yycolumn - 1, s);
+    printf("%s", lineptr);
+    for(int i = 0; i < yycolumn - 2; i++) {
+        printf(" ");
+    }
+    printf("^\n");
+    errorFlag = true;
 }

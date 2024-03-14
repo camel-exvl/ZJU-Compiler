@@ -135,6 +135,7 @@ class InitValList : public BaseStmt {
     }
 
     void append(InitVal *init_val) { init_vals_.push_back(init_val); }
+    void appendHead(InitVal *init_val) { init_vals_.insert(init_vals_.begin(), init_val); }
 
    private:
     std::vector<InitVal *> init_vals_;

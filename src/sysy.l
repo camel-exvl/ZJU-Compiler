@@ -7,10 +7,37 @@
 
 %{
 #include "sysy.tab.hh"
+extern bool errorFlag;
+extern char* filename;
+extern void yyerror(const char *s);
+
+int yycolumn = 1;
+#define YY_USER_ACTION \
+yylloc.first_line = yylloc.last_line = yylineno; \
+yylloc.first_column = yycolumn; \
+yylloc.last_column = yycolumn + yyleng - 1; \
+yycolumn += yyleng;
+
+char* lineptr = NULL;
+size_t n = 0;
+int consumed = 0, available = 0;
+#define YY_INPUT(buf, result, max_size) {\
+    if(available <= 0) {\
+        consumed = 0;\
+        available = getline(&lineptr, &n, yyin);\
+        if (available < 0) {\
+            if (ferror(yyin)) { perror("read error:"); }\
+            available = 0;\
+        }\
+    }\
+    result = available < max_size ? available : max_size;\
+    strncpy(buf, lineptr + consumed, result);\
+    consumed += result;\
+    available -= result;\
+}
 %}
 
 digit [0-9]
-blank [ \t\n]
 
 %%
 
@@ -18,8 +45,9 @@ blank [ \t\n]
 "/*"                    { BEGIN COMMENT; }
 <COMMENT>"*/"           { BEGIN INITIAL; }
 <COMMENT>.|\n           { /* skip everything */ }
-<COMMENT><<EOF>>        { printf("Unterminated comment at line %d\n", yylineno); exit(1); }
-{blank}         { }
+<COMMENT><<EOF>>        { yyerror("Unterminated comment"); }
+[ \t]           { }
+\n              { yycolumn = 1; }
 
 ","             { return COMMA; }
 ";"             { return SEMICOLON; }
@@ -62,6 +90,6 @@ blank [ \t\n]
 
 [a-zA-Z_][a-zA-Z0-9_]* { yylval.str = strdup(yytext); return IDENT; }
 
-.               { printf("Unrecognized character at line %d: %s\n", yylineno, yytext); exit(1);}
+.               { yyerror("Unrecognized character"); }
 
 %%
