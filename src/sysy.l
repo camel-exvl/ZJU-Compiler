@@ -6,6 +6,7 @@
 %x COMMENT
 
 %{
+#include <string>
 #include "sysy.tab.hh"
 extern bool errorFlag;
 extern char* filename;
@@ -90,6 +91,6 @@ digit [0-9]
 
 [a-zA-Z_][a-zA-Z0-9_]* { yylval.str = strdup(yytext); return IDENT; }
 
-.               { yyerror("Unrecognized character"); }
+.               { yyerror(("syntax error, unknown token '" + std::string(yytext) + "'").c_str()); }
 
 %%

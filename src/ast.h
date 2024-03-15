@@ -147,7 +147,7 @@ class ArrayDef : public BaseStmt {
 
     void print(int indent = 0, bool last = false) override {
         for (auto dim : dims_) {
-            dim->print(indent, dim == dims_.back());
+            dim->print(indent, last && dim == dims_.back());
         }
     }
 
@@ -202,9 +202,9 @@ class VarDecl : public BaseStmt {
 
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
-        printf("VarDecl: ");
+        printf("VarDecl: '");
         type_->print();
-        printf("\n");
+        printf("'\n");
         def_list_->print(indent + 1, true);
     }
 
@@ -341,7 +341,7 @@ class LVal : public Exp {
         printIndent(indent, last);
         if (arr_) {
             printf("LVal Array: %s\n", name_);
-            arr_->print(indent + 1, true);
+            arr_->print(indent + 1);
         } else {
             printf("LVal: %s\n", name_);
         }
@@ -449,7 +449,7 @@ class PrimaryExp : public Exp {
    public:
     PrimaryExp(Exp *exp) : exp_(exp) {}
 
-    void print(int indent = 0, bool last = false) override { exp_->print(indent, true); }
+    void print(int indent = 0, bool last = false) override { exp_->print(indent, last); }
 
    private:
     Exp *exp_;

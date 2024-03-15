@@ -10,9 +10,13 @@ extern int yylex(void);
 BaseStmt* root;
 bool errorFlag = false;
 
-extern int yylineno, yycolumn;
+extern int yylineno, yycolumn, yyleng;
+extern char *yytext;
 extern char* lineptr;
 extern char* filename;
+
+#include "sysy.tab.hh"
+void error_handle(const char *s, YYLTYPE pos);
 %}
 
 %code requires {
@@ -37,7 +41,6 @@ extern char* filename;
     Exp *exp;
     LVal *lval;
     LArrVal *lArrVal;
-    PrimaryExp *primaryExp;
     IntConst *intConst;
     FuncRParams *funcRParams;
     int num;
@@ -66,10 +69,9 @@ extern char* filename;
 %type <funcFArrParam> FuncFArrParam
 %type <block> Block BlockItem
 %type <baseStmt> Stmt
-%type <exp> Exp Cond UnaryExp LAndExp LOrExp MulExp AddExp RelExp EqExp
+%type <exp> Exp Cond PrimaryExp UnaryExp LAndExp LOrExp MulExp AddExp RelExp EqExp
 %type <lval> LVal
 %type <lArrVal> LArrVal
-%type <primaryExp> PrimaryExp
 %type <intConst> Number
 %type <str> UnaryOp
 %type <funcRParams> FuncRParams
@@ -82,13 +84,14 @@ extern char* filename;
 %%
 CompUnit : Decl { $$ = new CompUnit($1); root = $$; }
             | FuncDef { $$ = new CompUnit($1); root = $$; }
-CompUnit : CompUnit Decl { $1->append($2); $$ = $1; }
+            | CompUnit Decl { $1->append($2); $$ = $1; }
             | CompUnit FuncDef { $1->append($2); $$ = $1; }
 
 Decl : VarDecl { $$ = $1;}
 BType : INT { $$ = new Type("int"); }
 
 VarDecl : BType VarDefList SEMICOLON { $$ = new VarDecl($1, $2); }
+            | FuncType VarDefList SEMICOLON { error_handle("syntax error, variable type is not a valid type", @1); YYERROR; }
 VarDefList : VarDef { $$ = new VarDefList(); $$->append($1); }
             | VarDefList COMMA VarDef { $$ = $1; $$->append($3); }
 VarDef : IDENT ArrayDef InitValDef { $$ = new VarDef($1, $2, $3); }
@@ -112,6 +115,7 @@ FuncFParams : FuncFParam { $$ = new FuncFParams(); $$->append($1); }
 FuncFParam : BType IDENT { $$ = new FuncFParam($1, $2, nullptr); }
             | BType IDENT LBRACKET RBRACKET { $$ = new FuncFParam($1, $2, new FuncFArrParam()); }
             | BType IDENT LBRACKET RBRACKET FuncFArrParam { $$ = new FuncFParam($1, $2, $5); }
+            | FuncType { error_handle("syntax error, argument type is not a valid type", @1); YYERROR; }
 FuncFArrParam : LBRACKET INTCONST RBRACKET { $$ = new FuncFArrParam(); $$->append($2); }
             | FuncFArrParam LBRACKET INTCONST RBRACKET { $$ = $1; $$->append($3); }
 
@@ -128,6 +132,7 @@ Stmt : LVal ASSIGN Exp SEMICOLON { $$ = new AssignStmt($1, $3); }
         | WHILE LPAREN Cond RPAREN Stmt { $$ = new WhileStmt($3, $5); }
         | RETURN SEMICOLON { $$ = new ReturnStmt(); }
         | RETURN Exp SEMICOLON { $$ = new ReturnStmt($2); }
+        | INTCONST ASSIGN Exp SEMICOLON { error_handle("syntax error, rvalue cannot be assigned to", @1); YYERROR; }
         | error SEMICOLON { $$ = nullptr; }
 
 Exp : AddExp { $$ = $1; }
@@ -137,8 +142,8 @@ LVal : IDENT { $$ = new LVal($1);}
 LArrVal : LBRACKET Exp RBRACKET { $$ = new LArrVal(); $$->append($2); }
         | LArrVal LBRACKET Exp RBRACKET { $$ = $1; $$->append($3); }
 PrimaryExp : LPAREN Exp RPAREN { $$ = new PrimaryExp($2); }
-        | LVal { $$ = new PrimaryExp($1);}
-        | Number { $$ = new PrimaryExp($1); }
+        | LVal { $$ = $1;}
+        | Number { $$ = $1; }
 Number : INTCONST { $$ = new IntConst($1); }
 UnaryExp : PrimaryExp { $$ = $1; }
         | IDENT LPAREN RPAREN { $$ = new CallExp($1);}
@@ -171,12 +176,25 @@ LOrExp : LAndExp { $$ = $1; }
         | LOrExp OR LAndExp { $$ = new LogicExp($1, $3, "||"); }
 %%
 
+void error_handle(const char *s, YYLTYPE pos) {
+    yyleng = pos.last_column - pos.first_column + 1; 
+    yycolumn = pos.last_column + 1;
+    yyerror(s);
+}
+
 void yyerror(const char *s) {
-    printf("%s:%d:%d: error: %s\n", filename, yylineno, yycolumn - 1, s);
-    printf("%s", lineptr);
-    for(int i = 0; i < yycolumn - 2; i++) {
-        printf(" ");
+    fprintf(stderr, "\x1b[1m%s:%d:%d:\x1b[0m \x1b[1;31merror: \x1b[0m%s\n", filename, yylineno, yycolumn - 1, s);
+    int spaceLen = fprintf(stderr, "  %d | ", yylineno);
+
+    // print the line
+    fprintf(stderr, "%.*s", yycolumn - yyleng - 1, lineptr);
+    fprintf(stderr, "\x1b[1;31m%.*s\x1b[0m", yyleng, lineptr + yycolumn - yyleng - 1);
+    fprintf(stderr, "%s", lineptr + yycolumn - 1);
+
+    fprintf(stderr, "%*c| \x1b[1;31m%*c", spaceLen - 2, ' ', yycolumn - yyleng, '^');
+    for (int i = 1; i < yyleng; i++) {
+        fprintf(stderr, "~");
     }
-    printf("^\n");
+    fprintf(stderr, "\x1b[0m\n");
     errorFlag = true;
 }
