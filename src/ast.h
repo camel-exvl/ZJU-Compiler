@@ -13,6 +13,7 @@ class BaseStmt {
         if (indent == 0) {
             return;
         }
+        // resize lastFlags if necessary
         if (lastFlags.size() < (size_t)indent) {
             lastFlags.resize(lastFlags.size() << 1, false);
         }
@@ -261,7 +262,7 @@ class FuncFParams : public BaseStmt {
 
     void print(int indent = 0, bool last = false) override {
         for (auto fparam : fparams_) {
-            fparam->print(indent + 1, fparam == fparams_.back());
+            fparam->print(indent, last && fparam == fparams_.back());
         }
     }
 
@@ -478,7 +479,7 @@ class CallExp : public Exp {
 
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
-        printf("CallExp: %s\n", name_);
+        printf("Call: %s\n", name_);
         if (params_) {
             params_->print(indent + 1, true);
         }
