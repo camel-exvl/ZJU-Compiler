@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 ### Settings ###
 
-TIMEOUT = 5
+TIMEOUT = 10
 IR_PATH = "./ir.py"
 VENUS_JAR = "./venus.jar"
 PYTHON_PATH = sys.executable  # always use the current python
