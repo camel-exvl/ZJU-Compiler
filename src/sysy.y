@@ -7,8 +7,8 @@
 void yyerror(const char *s);
 extern int yylex(void);
 #include "ast.h"
-BaseStmt* root;
-bool errorFlag = false;
+extern BaseStmt* root;
+extern bool errorFlag;
 
 extern int yylineno, yycolumn, yyleng;
 extern char *yytext;
@@ -25,7 +25,7 @@ void error_handle(const char *s, YYLTYPE pos);
 
 %union {
     CompUnit *comp;
-    Type *type;
+    TypeDecl *type;
     VarDecl *varDecl;
     VarDefList *varDefList;
     VarDef *varDef;
@@ -88,7 +88,7 @@ CompUnit : Decl { $$ = new CompUnit($1); root = $$; }
             | CompUnit FuncDef { $1->append($2); $$ = $1; }
 
 Decl : VarDecl { $$ = $1;}
-BType : INT { $$ = new Type("int"); }
+BType : INT { $$ = new TypeDecl(Type(TypeKind::SIMPLE, {SimpleKind::INT})); }
 
 VarDecl : BType VarDefList SEMICOLON { $$ = new VarDecl($1, $2); }
             | FuncType VarDefList SEMICOLON { error_handle("syntax error, variable type is not a valid type", @1); YYERROR; }
@@ -109,7 +109,7 @@ FuncDef : FuncType IDENT LPAREN FuncFParams RPAREN Block { $$ = new FuncDef($1, 
             | BType IDENT LPAREN FuncFParams RPAREN Block { $$ = new FuncDef($1, $2, $4, $6); }
             | FuncType IDENT LPAREN RPAREN Block { $$ = new FuncDef($1, $2, nullptr, $5); }
             | BType IDENT LPAREN RPAREN Block { $$ = new FuncDef($1, $2, nullptr, $5); }
-FuncType : VOID { $$ = new Type("void"); }
+FuncType : VOID { $$ = new TypeDecl(Type(TypeKind::SIMPLE, {SimpleKind::VOID})); }
 FuncFParams : FuncFParam { $$ = new FuncFParams(); $$->append($1); }
             | FuncFParams COMMA FuncFParam { $$ = $1; $$->append($3); }
 FuncFParam : BType IDENT { $$ = new FuncFParam($1, $2, nullptr); }

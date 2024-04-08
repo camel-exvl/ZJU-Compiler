@@ -3,36 +3,83 @@
 
 #include <cstdio>
 #include <vector>
+#include <stack>
+#include <list>
+#include <string>
+#include <unordered_map>
+#include <stdexcept>
+
+class Type;
+class Table;
+
+extern void yyerror(const char *s);
+extern Table *globalTable;
+
+enum class SimpleKind { SCOPE, UNKNOWN, INT, VOID };
+enum class TypeKind { SIMPLE, ARRAY, FUNC };
+
+struct ARRAYVAL;
+struct FUNCVAL;
+typedef union TYPEVAL {
+    SimpleKind simple;
+    struct ARRAYVAL *array;
+    struct FUNCVAL *func;
+} TypeVal;
 
 static std::vector<bool> lastFlags(8, false);
 
+class Type {
+   public:
+    Type() : kind_(TypeKind::SIMPLE), val_({SimpleKind::UNKNOWN}) {}
+    Type(TypeKind kind, TypeVal val_) : kind_(kind), val_(val_) {}
+
+    bool operator==(const Type &other) const;
+    bool operator!=(const Type &other) const { return !(*this == other); }
+    bool isScope() const { return kind_ == TypeKind::SIMPLE && val_.simple == SimpleKind::SCOPE; }
+    std::string toString();
+
+    TypeKind getKind() { return kind_; }
+    void setKind(TypeKind kind) { kind_ = kind; }
+    TypeVal getVal() { return val_; }
+    void setVal(TypeVal val) { val_ = val; }
+
+   private:
+    TypeKind kind_;
+    TypeVal val_;
+};
+
+typedef struct ARRAYVAL {
+    std::vector<int> size;
+    Type type;
+} ArrayVal;
+
+typedef struct FUNCVAL {
+    std::vector<Type> params;
+    Type ret;
+} FuncVal;
+
+class Table {
+   public:
+    Table() {}
+
+    void insert(const char *name, Type type);
+    Type lookup(const char *name);
+    void enterScope() {
+        undo_.push(std::string());
+    }
+    void exitScope();
+
+   private:
+    std::unordered_map<std::string, std::stack<Type>> table_;
+    std::stack<std::string> undo_;
+};
+
 class BaseStmt {
    public:
+    virtual ~BaseStmt() {}
+    virtual Type typeCheck(Table *table) = 0;
     virtual void print(int indent = 0, bool last = false) = 0;
-    static void printIndent(int indent = 0, bool last = false) {
-        if (indent == 0) {
-            return;
-        }
-        // resize lastFlags if necessary
-        if (lastFlags.size() < (size_t)indent) {
-            lastFlags.resize(lastFlags.size() << 1, false);
-        }
-
-        for (int i = 0; i < indent - 1; ++i) {
-            if (lastFlags[i]) {
-                printf("    ");
-            } else {
-                printf("│   ");
-            }
-        }
-        if (last) {
-            printf("└─");
-            lastFlags[indent - 1] = true;
-        } else {
-            printf("├─");
-            lastFlags[indent - 1] = false;
-        }
-    }
+    static void printIndent(int indent = 0, bool last = false);
 };
 
 class Exp : public BaseStmt {};
@@ -40,6 +87,8 @@ class Exp : public BaseStmt {};
 class Ident : public Exp {
    public:
     Ident(const char *name) : name_(name) {}
+
+    Type typeCheck(Table *table) override { return table->lookup(name_); }
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
         printf("Ident: %s\n", name_);
@@ -52,6 +101,9 @@ class Ident : public Exp {
 class IntConst : public Exp {
    public:
     IntConst(int val) : val_(val) {}
+
+    Type typeCheck(Table *table) override { return Type(TypeKind::SIMPLE, {SimpleKind::INT}); }
+    int getValue() { return val_; }
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
         printf("IntConst: %d\n", val_);
@@ -64,7 +116,9 @@ class IntConst : public Exp {
 class ExprStmt : public BaseStmt {
    public:
     ExprStmt(Exp *expr) : expr_(expr) {}
+    ~ExprStmt() { delete expr_; }
 
+    Type typeCheck(Table *table) override { return expr_->typeCheck(table); }
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
         expr_->print(indent + 1, true);
@@ -77,48 +131,40 @@ class ExprStmt : public BaseStmt {
 class CompUnit : public BaseStmt {
    public:
     CompUnit(BaseStmt *stmt) { stmts_.push_back(stmt); }
-
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("CompUnit\n");
+    ~CompUnit() {
         for (auto stmt : stmts_) {
-            stmt->print(indent + 1, stmt == stmts_.back());
+            delete stmt;
         }
     }
 
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
     void append(BaseStmt *stmt) { stmts_.push_back(stmt); }
 
    private:
     std::vector<BaseStmt *> stmts_;
 };
 
-class Type : public BaseStmt {
+class TypeDecl : public BaseStmt {
    public:
-    Type(const char *name) : name_(name) {}
-    void print(int indent = 0, bool last = false) override { printf("%s", name_); }
+    TypeDecl(Type type) : type_(type) {}
+
+    Type typeCheck(Table *table) override { return type_; }
+    void print(int indent = 0, bool last = false) override { printf("%s", type_.toString().c_str()); }
 
    private:
-    const char *name_;
+    Type type_;
 };
 
 class InitVal : public BaseStmt {
    public:
     InitVal(BaseStmt *val, bool is_list_) : val_(val), is_list_(is_list_) {}
+    ~InitVal() { delete val_; }
 
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        if (is_list_) {
-            printf("InitValList\n");
-        } else {
-            printf("InitVal\n");
-        }
-        if (val_) {
-            val_->print(indent + 1, true);
-        } else {
-            printIndent(indent + 1, true);
-            printf("{}\n");
-        }
+    Type typeCheck(Table *table) override {
+        return val_ ? val_->typeCheck(table) : Type(TypeKind::SIMPLE, {SimpleKind::UNKNOWN});
     }
+    void print(int indent = 0, bool last = false) override;
 
    private:
     BaseStmt *val_;
@@ -128,13 +174,18 @@ class InitVal : public BaseStmt {
 class InitValList : public BaseStmt {
    public:
     InitValList() {}
+    ~InitValList() {
+        for (auto init_val : init_vals_) {
+            delete init_val;
+        }
+    }
 
+    Type typeCheck(Table *table) override;
     void print(int indent = 0, bool last = false) override {
         for (auto init_val : init_vals_) {
             init_val->print(indent, init_val == init_vals_.back());
         }
     }
-
     void append(InitVal *init_val) { init_vals_.push_back(init_val); }
     void appendHead(InitVal *init_val) { init_vals_.insert(init_vals_.begin(), init_val); }
 
@@ -145,13 +196,18 @@ class InitValList : public BaseStmt {
 class ArrayDef : public BaseStmt {
    public:
     ArrayDef() {}
+    ~ArrayDef() {
+        for (auto dim : dims_) {
+            delete dim;
+        }
+    }
 
+    Type typeCheck(Table *table) override;
     void print(int indent = 0, bool last = false) override {
         for (auto dim : dims_) {
             dim->print(indent, last && dim == dims_.back());
         }
     }
-
     void append(int dim) { dims_.push_back(new IntConst(dim)); }
 
    private:
@@ -161,19 +217,14 @@ class ArrayDef : public BaseStmt {
 class VarDef : public BaseStmt {
    public:
     VarDef(const char *name, ArrayDef *array_def, InitVal *init) : name_(name), array_def_(array_def), init_(init) {}
-
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        if (array_def_) {
-            printf("VarDef Array: %s\n", name_);
-            array_def_->print(indent + 1, !init_);
-        } else {
-            printf("VarDef: %s\n", name_);
-        }
-        if (init_) {
-            init_->print(indent + 1, true);
-        }
+    ~VarDef() {
+        delete array_def_;
+        delete init_;
     }
+
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
+    const char *getName() { return name_; }
 
    private:
     const char *name_;
@@ -184,14 +235,20 @@ class VarDef : public BaseStmt {
 class VarDefList : public BaseStmt {
    public:
     VarDefList() {}
+    ~VarDefList() {
+        for (auto def : defs_) {
+            delete def;
+        }
+    }
 
+    Type typeCheck(Table *table) override { throw std::runtime_error("VarDefList typeCheck is never called"); }
     void print(int indent = 0, bool last = false) override {
         for (auto def : defs_) {
             def->print(indent, def == defs_.back());
         }
     }
-
     void append(VarDef *def) { defs_.push_back(def); }
+    std::vector<VarDef *> getDefs() { return defs_; }
 
    private:
     std::vector<VarDef *> defs_;
@@ -199,36 +256,31 @@ class VarDefList : public BaseStmt {
 
 class VarDecl : public BaseStmt {
    public:
-    VarDecl(Type *type, VarDefList *def_list) : type_(type), def_list_(def_list) {}
-
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("VarDecl: '");
-        type_->print();
-        printf("'\n");
-        def_list_->print(indent + 1, true);
+    VarDecl(TypeDecl *type, VarDefList *def_list) : type_(type), def_list_(def_list) {}
+    ~VarDecl() {
+        delete type_;
+        delete def_list_;
     }
 
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
+
    private:
-    Type *type_;
+    TypeDecl *type_;
     VarDefList *def_list_;
 };
 
 class FuncFArrParam : public BaseStmt {
    public:
     FuncFArrParam() { dims_.push_back(nullptr); }
-
-    void print(int indent = 0, bool last = false) override {
+    ~FuncFArrParam() {
         for (auto dim : dims_) {
-            if (dim) {
-                dim->print(indent + 1, dim == dims_.back());
-            } else {
-                printIndent(indent + 1, dim == dims_.back());
-                printf("[]\n");
-            }
+            delete dim;
         }
     }
 
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
     void append(int dim) { dims_.push_back(new IntConst(dim)); }
 
    private:
@@ -237,21 +289,18 @@ class FuncFArrParam : public BaseStmt {
 
 class FuncFParam : public BaseStmt {
    public:
-    FuncFParam(Type *ftype, const char *name, FuncFArrParam *arr_param_)
+    FuncFParam(TypeDecl *ftype, const char *name, FuncFArrParam *arr_param_)
         : ftype_(ftype), name_(name), arr_param_(arr_param_) {}
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("FuncFParam: ");
-        printf(" %s '", name_);
-        ftype_->print();
-        printf("'\n");
-        if (arr_param_) {
-            arr_param_->print(indent + 1, true);
-        }
+    ~FuncFParam() {
+        delete ftype_;
+        delete arr_param_;
     }
 
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
+
    private:
-    Type *ftype_;
+    TypeDecl *ftype_;
     const char *name_;
     FuncFArrParam *arr_param_;
 };
@@ -259,14 +308,20 @@ class FuncFParam : public BaseStmt {
 class FuncFParams : public BaseStmt {
    public:
     FuncFParams() {}
+    ~FuncFParams() {
+        for (auto fparam : fparams_) {
+            delete fparam;
+        }
+    }
 
+    Type typeCheck(Table *table) override { throw std::runtime_error("FuncFParams typeCheck is never called"); }
     void print(int indent = 0, bool last = false) override {
         for (auto fparam : fparams_) {
             fparam->print(indent, last && fparam == fparams_.back());
         }
     }
-
     void append(FuncFParam *fparam) { fparams_.push_back(fparam); }
+    std::vector<FuncFParam *> getFParams() { return fparams_; }
 
    private:
     std::vector<FuncFParam *> fparams_;
@@ -275,15 +330,14 @@ class FuncFParams : public BaseStmt {
 class Block : public BaseStmt {
    public:
     Block() {}
-
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("Block\n");
+    ~Block() {
         for (auto stmt : stmts_) {
-            stmt->print(indent + 1, stmt == stmts_.back());
+            delete stmt;
         }
     }
 
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
     void append(BaseStmt *stmt) { stmts_.push_back(stmt); }
 
    private:
@@ -292,26 +346,19 @@ class Block : public BaseStmt {
 
 class FuncDef : public BaseStmt {
    public:
-    FuncDef(Type *ftype, const char *name, FuncFParams *fparams, Block *body)
+    FuncDef(TypeDecl *ftype, const char *name, FuncFParams *fparams, Block *body)
         : ftype_(ftype), name_(name), fparams_(fparams), body_(body) {}
-
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("FuncDef: %s\n", name_);
-        printIndent(indent + 1, !(fparams_ || body_));
-        printf("Return type: '");
-        ftype_->print();
-        printf("'\n");
-        if (fparams_) {
-            fparams_->print(indent + 1, !body_);
-        }
-        if (body_) {
-            body_->print(indent + 1, true);
-        }
+    ~FuncDef() {
+        delete ftype_;
+        delete fparams_;
+        delete body_;
     }
 
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
+
    private:
-    Type *ftype_;
+    TypeDecl *ftype_;
     const char *name_;
     FuncFParams *fparams_;
     Block *body_;
@@ -320,14 +367,20 @@ class FuncDef : public BaseStmt {
 class LArrVal : public BaseStmt {
    public:
     LArrVal() {}
+    ~LArrVal() {
+        for (auto exp : dims_) {
+            delete exp;
+        }
+    }
 
+    Type typeCheck(Table *table) override { throw std::runtime_error("LArrVal typeCheck is never called"); }
     void print(int indent = 0, bool last = false) override {
         for (auto exp : dims_) {
             exp->print(indent, exp == dims_.back());
         }
     }
-
     void append(Exp *dim) { dims_.push_back(dim); }
+    std::vector<Exp *> getDims() { return dims_; }
 
    private:
     std::vector<Exp *> dims_;
@@ -337,16 +390,10 @@ class LVal : public Exp {
    public:
     LVal(const char *name) : name_(name), arr_(nullptr) {}
     LVal(const char *name, LArrVal *arr) : name_(name), arr_(arr) {}
+    ~LVal() { delete arr_; }
 
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        if (arr_) {
-            printf("LVal Array: %s\n", name_);
-            arr_->print(indent + 1);
-        } else {
-            printf("LVal: %s\n", name_);
-        }
-    }
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
 
    private:
     const char *name_;
@@ -356,13 +403,13 @@ class LVal : public Exp {
 class AssignStmt : public BaseStmt {
    public:
     AssignStmt(LVal *lhs, Exp *rhs) : lhs_(lhs), rhs_(rhs) {}
-
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("AssignStmt: =\n");
-        lhs_->print(indent + 1, false);
-        rhs_->print(indent + 1, true);
+    ~AssignStmt() {
+        delete lhs_;
+        delete rhs_;
     }
+
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
 
    private:
     LVal *lhs_;
@@ -371,6 +418,7 @@ class AssignStmt : public BaseStmt {
 
 class EmptyStmt : public BaseStmt {
    public:
+    Type typeCheck(Table *table) override { return Type(TypeKind::SIMPLE, {SimpleKind::VOID}); }
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
         printf("EmptyStmt\n");
@@ -380,7 +428,12 @@ class EmptyStmt : public BaseStmt {
 class ExpStmt : public BaseStmt {
    public:
     ExpStmt(Exp *expr) : expr_(expr) {}
+    ~ExpStmt() { delete expr_; }
 
+    Type typeCheck(Table *table) override {
+        expr_->typeCheck(table);
+        return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
+    }
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
         printf("ExpStmt\n");
@@ -394,18 +447,15 @@ class ExpStmt : public BaseStmt {
 class IfStmt : public BaseStmt {
    public:
     IfStmt(Exp *cond, BaseStmt *then) : cond_(cond), then_(then), els_(nullptr) {}
-
     IfStmt(Exp *cond, BaseStmt *then, BaseStmt *els) : cond_(cond), then_(then), els_(els) {}
-
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("IfStmt\n");
-        cond_->print(indent + 1, false);
-        then_->print(indent + 1, !els_);
-        if (els_) {
-            els_->print(indent + 1, true);
-        }
+    ~IfStmt() {
+        delete cond_;
+        delete then_;
+        delete els_;
     }
+
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
 
    private:
     Exp *cond_;
@@ -416,13 +466,13 @@ class IfStmt : public BaseStmt {
 class WhileStmt : public BaseStmt {
    public:
     WhileStmt(Exp *cond, BaseStmt *body) : cond_(cond), body_(body) {}
-
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("WhileStmt\n");
-        cond_->print(indent + 1, false);
-        body_->print(indent + 1, true);
+    ~WhileStmt() {
+        delete cond_;
+        delete body_;
     }
+
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
 
    private:
     Exp *cond_;
@@ -433,14 +483,10 @@ class ReturnStmt : public BaseStmt {
    public:
     ReturnStmt() : ret_(nullptr) {}
     ReturnStmt(Exp *ret) : ret_(ret) {}
+    ~ReturnStmt() { delete ret_; }
 
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("ReturnStmt\n");
-        if (ret_) {
-            ret_->print(indent + 1, true);
-        }
-    }
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
 
    private:
     Exp *ret_;
@@ -449,7 +495,9 @@ class ReturnStmt : public BaseStmt {
 class PrimaryExp : public Exp {
    public:
     PrimaryExp(Exp *exp) : exp_(exp) {}
+    ~PrimaryExp() { delete exp_; }
 
+    Type typeCheck(Table *table) override { return exp_->typeCheck(table); }
     void print(int indent = 0, bool last = false) override { exp_->print(indent, last); }
 
    private:
@@ -459,14 +507,20 @@ class PrimaryExp : public Exp {
 class FuncRParams : public BaseStmt {
    public:
     FuncRParams() {}
+    ~FuncRParams() {
+        for (auto param : params_) {
+            delete param;
+        }
+    }
 
+    Type typeCheck(Table *table) override { throw std::runtime_error("FuncRParams typeCheck is never called"); }
     void print(int indent = 0, bool last = false) override {
         for (auto param : params_) {
             param->print(indent, param == params_.back());
         }
     }
-
     void append(Exp *param) { params_.push_back(param); }
+    std::vector<Exp *> getParams() { return params_; }
 
    private:
     std::vector<Exp *> params_;
@@ -476,14 +530,10 @@ class CallExp : public Exp {
    public:
     CallExp(const char *name) : name_(name), params_(nullptr) {}
     CallExp(const char *name, FuncRParams *params) : name_(name), params_(params) {}
+    ~CallExp() { delete params_; }
 
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("Call: %s\n", name_);
-        if (params_) {
-            params_->print(indent + 1, true);
-        }
-    }
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
 
    private:
     const char *name_;
@@ -493,12 +543,10 @@ class CallExp : public Exp {
 class UnaryExp : public Exp {
    public:
     UnaryExp(const char *&op, Exp *exp) : op_(op), exp_(exp) {}
+    ~UnaryExp() { delete exp_; }
 
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("UnaryExp: %s\n", op_);
-        exp_->print(indent + 1, true);
-    }
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
 
    private:
     const char *op_;
@@ -508,13 +556,13 @@ class UnaryExp : public Exp {
 class BinaryExp : public Exp {
    public:
     BinaryExp(Exp *lhs, Exp *rhs, const char *op) : lhs_(lhs), rhs_(rhs), op_(op) {}
-
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("BinaryExp: %s\n", op_);
-        lhs_->print(indent + 1, false);
-        rhs_->print(indent + 1, true);
+    ~BinaryExp() {
+        delete lhs_;
+        delete rhs_;
     }
+
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
 
    private:
     Exp *lhs_, *rhs_;
@@ -524,13 +572,13 @@ class BinaryExp : public Exp {
 class RelExp : public Exp {
    public:
     RelExp(Exp *lhs, Exp *rhs, const char *op) : lhs_(lhs), rhs_(rhs), op_(op) {}
-
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("RelExp: %s\n", op_);
-        lhs_->print(indent + 1, false);
-        rhs_->print(indent + 1, true);
+    ~RelExp() {
+        delete lhs_;
+        delete rhs_;
     }
+
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
 
    private:
     Exp *lhs_, *rhs_;
@@ -540,13 +588,13 @@ class RelExp : public Exp {
 class LogicExp : public Exp {
    public:
     LogicExp(Exp *lhs, Exp *rhs, const char *op) : lhs_(lhs), rhs_(rhs), op_(op) {}
-
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        printf("LogicExp: %s\n", op_);
-        lhs_->print(indent + 1, false);
-        rhs_->print(indent + 1, true);
+    ~LogicExp() {
+        delete lhs_;
+        delete rhs_;
     }
+
+    Type typeCheck(Table *table) override;
+    void print(int indent = 0, bool last = false) override;
 
    private:
     Exp *lhs_, *rhs_;

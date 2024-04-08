@@ -3,9 +3,11 @@
 extern int yylineno;
 extern int yyparse();
 extern void yyrestart(FILE*);
-extern BaseStmt* root;
-extern bool errorFlag;
+
+BaseStmt* root = nullptr;
+bool errorFlag = false;
 char* filename;
+Table* globalTable = new Table();
 
 int main(int argc, char** argv) {
     if (argc != 2) {
@@ -29,6 +31,8 @@ int main(int argc, char** argv) {
     }
     if (root) {
         root->print();
+        root->typeCheck(globalTable);
+        delete root;
     }
     return 0;
 }
