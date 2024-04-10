@@ -117,14 +117,18 @@ def run_one_test(compiler: str, test: Test, lab: str) -> TestResult:
                                   stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE,
                                   text=True) as p:
-                if test.inputs is not None:
-                    outputs, _ = p.communicate(
-                        input="\n".join(test.inputs), timeout=TIMEOUT)
-                else:
-                    outputs, _ = p.communicate(timeout=TIMEOUT)
-                outputs = outputs.strip().split("\n")
-                returnvalue = p.returncode
-                return TestResult(test, outputs, returnvalue)
+                try:
+                    if test.inputs is not None:
+                        outputs, _ = p.communicate(
+                            input="\n".join(test.inputs), timeout=TIMEOUT)
+                    else:
+                        outputs, _ = p.communicate(timeout=TIMEOUT)
+                    outputs = outputs.strip().split("\n")
+                    returnvalue = p.returncode
+                    return TestResult(test, outputs, returnvalue)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    raise
         except subprocess.TimeoutExpired:
             print(red(f"Error: {test.filename} timed out."))
             return TestResult(test, None, -1)
