@@ -1,13 +1,15 @@
 #include "ast.h"
 
 bool Type::operator==(const Type& other) const {
+    if (kind_ == TypeKind::UNKNOWN || other.kind_ == TypeKind::UNKNOWN) {
+        return true;
+    }
     if (kind_ != other.kind_) {
         return false;
     }
 
     if (kind_ == TypeKind::SIMPLE) {
-        return val_.simple == other.val_.simple || val_.simple == SimpleKind::UNKNOWN ||
-               other.val_.simple == SimpleKind::UNKNOWN;
+        return val_.simple == other.val_.simple;
     } else if (kind_ == TypeKind::ARRAY) {
         if (val_.array->type != other.val_.array->type || val_.array->size.size() != other.val_.array->size.size()) {
             return false;
@@ -32,72 +34,93 @@ bool Type::operator==(const Type& other) const {
     throw std::runtime_error("unknown type kind");
 }
 
-std::string Type::toString() {
-    if (kind_ == TypeKind::SIMPLE) {
+std::string Type::toString(std::string name) {
+    if (!name.empty()) {
+        name = " " + name;
+    }
+
+    if (kind_ == TypeKind::UNKNOWN) {
+        return "unknown" + name;
+    } else if (kind_ == TypeKind::SIMPLE) {
         switch (val_.simple) {
             case SimpleKind::INT:
-                return "int";
+                return "int" + name;
             case SimpleKind::VOID:
-                return "void";
+                return "void" + name;
             case SimpleKind::SCOPE:
-                return "scope";
-            case SimpleKind::UNKNOWN:
-                return "unknown";
+                return "scope" + name;
             default:
-                return "error";
+                return "error" + name;
         }
     } else if (kind_ == TypeKind::ARRAY) {
-        return "array";
+        std::string ret = val_.array->type.toString();
+        for (auto size : val_.array->size) {
+            ret += "[" + std::to_string(size) + "]";
+        }
+        return ret + name;
     } else if (kind_ == TypeKind::FUNC) {
-        return "function";
+        std::string ret = val_.func->ret.toString() + name + "(";
+        for (size_t i = 0; i < val_.func->params.size(); ++i) {
+            ret += val_.func->params[i].toString();
+            if (i != val_.func->params.size() - 1) {
+                ret += ", ";
+            }
+        }
+        ret += ")";
+        return ret;
     } else {
         return "error";
     }
 }
 
-void Table::insert(const char* name, Type type) {
+void Table::insert(const char* name, Type type, YYLTYPE pos) {
     if (!table_.count(name)) {
-        table_[name] = std::stack<Type>();
-    } else if (!table_[name].top().isScope()) {
-        if (table_[name].top() == type) {
-            yyerror(("redefinition of '" + type.toString() + " " + std::string(name) + "'").c_str());
+        table_[name] = std::list<Type>();
+        table_[name].emplace_back(Type(TypeKind::SIMPLE, {SimpleKind::SCOPE}));
+    } else if (!table_[name].back().isScope()) {
+        if (table_[name].back() == type) {
+            error_handle(("redefinition of '" + type.toString(name) + "'").c_str(), pos);
         } else {
-            yyerror(("conflicting declaration '" + type.toString() + " " + std::string(name) + "'").c_str());
+            error_handle(("conflicting declaration '" + type.toString(name) + "'").c_str(), pos);
         }
         return;
     }
-    table_[name].push(Type(TypeKind::SIMPLE, {SimpleKind::SCOPE}));
-    table_[name].push(type);
-    undo_.push(name);
+    table_[name].emplace_back(type);
 }
 
-Type Table::lookup(const char* name) {
+Type Table::lookup(const char* name, YYLTYPE pos) {
     if (!table_.count(name)) {
-        yyerror(("'" + std::string(name) + "' was not declared in this scope").c_str());
-        return Type(TypeKind::SIMPLE, {SimpleKind::UNKNOWN});
+        error_handle(("'" + std::string(name) + "' was not declared in this scope").c_str(), pos);
+        return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
     }
-    return table_[name].top();
+    for (auto it = table_[name].rbegin(); it != table_[name].rend(); ++it) {
+        if (!it->isScope()) {
+            return *it;
+        }
+    }
+    error_handle(("'" + std::string(name) + "' was not declared in this scope").c_str(), pos);
+    return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
+}
+
+void Table::enterScope() {
+    for (auto& [name, list] : table_) {
+        list.emplace_back(Type(TypeKind::SIMPLE, {SimpleKind::SCOPE}));
+    }
 }
 
 void Table::exitScope() {
-    if (undo_.empty()) {
-        throw std::runtime_error("Table::exitScope: undo_ is empty");
-    }
-    std::string name = undo_.top();
-    undo_.pop();
-    while (!name.empty()) {
-        // delete if necessary
-        Type type = table_[name].top();
-        if (type.getKind() == TypeKind::ARRAY) {
-            delete type.getVal().array;
-        } else if (type.getKind() == TypeKind::FUNC) {
-            delete type.getVal().func;
+    std::vector<std::string> toDelete;
+    for (auto& [name, list] : table_) {
+        while (!list.empty() && !list.back().isScope()) {
+            list.pop_back();
         }
-
-        table_[name].pop();
-        table_[name].pop();
-        name = undo_.top();
-        undo_.pop();
+        list.pop_back();
+        if (list.empty()) {
+            toDelete.emplace_back(name);
+        }
+    }
+    for (auto name : toDelete) {
+        table_.erase(name);
     }
 }
 
@@ -131,11 +154,11 @@ Type CompUnit::typeCheck(Table* table) {
     // insert read and write function
     Type read = Type(TypeKind::FUNC, TypeVal{.func = new FuncVal()});
     read.getVal().func->ret = Type(TypeKind::SIMPLE, {SimpleKind::INT});
-    table->insert("read", read);
+    table->insert("read", read, pos);
     Type write = Type(TypeKind::FUNC, TypeVal{.func = new FuncVal()});
     write.getVal().func->ret = Type(TypeKind::SIMPLE, {SimpleKind::VOID});
     write.getVal().func->params.emplace_back(Type(TypeKind::SIMPLE, {SimpleKind::INT}));
-    table->insert("write", write);
+    table->insert("write", write, pos);
 
     for (auto stmt : stmts_) {
         stmt->typeCheck(table);
@@ -168,22 +191,6 @@ void InitVal::print(int indent, bool last) {
     }
 }
 
-Type InitValList::typeCheck(Table* table) {
-    Type type = Type(TypeKind::ARRAY, TypeVal{.array = new ArrayVal()});
-    for (auto init_val : init_vals_) {
-        Type cur = init_val->typeCheck(table);
-        if (cur.getKind() == TypeKind::ARRAY) {
-            type.getVal().array->size.insert(type.getVal().array->size.end(), cur.getVal().array->size.begin(),
-                                             cur.getVal().array->size.end());
-            type.getVal().array->type = cur.getVal().array->type;
-        } else if (cur.getKind() == TypeKind::SIMPLE) {
-            type.getVal().array->size.emplace_back(1);
-            type.getVal().array->type = cur;
-        }
-    }
-    return type;
-}
-
 Type ArrayDef::typeCheck(Table* table) {
     Type type = Type(TypeKind::ARRAY, TypeVal{.array = new ArrayVal()});
     for (auto dim : dims_) {
@@ -192,27 +199,66 @@ Type ArrayDef::typeCheck(Table* table) {
     return type;
 }
 
+// TODO: need test
+void arrayInitlistTypeCheck(std::vector<int>& size, int l, int r, InitVal* init) {
+    if (!init->getVal()) {
+        return;
+    }
+    if (!init->isList()) {
+        error_handle("array must be initialized with a brace-enclosed initializer", init->getPos());
+        return;
+    }
+
+    int maxNum = 1;
+    for (int i = l; i <= r; ++i) {
+        maxNum *= size[i];
+    }
+    int finishedNum = 0;
+    for (auto val : static_cast<InitValList*>(init->getVal())->getInitVals()) {
+        if (val->isList()) {
+            if (finishedNum % size[r] != 0) {
+                error_handle("array initlist size not match", val->getPos());
+                return;
+            }
+
+            int edge = r;
+            while (edge > l && finishedNum % size[edge] == 0) {
+                --edge;
+            }
+            arrayInitlistTypeCheck(size, edge + 1, r, val);
+
+            int mul = 1;
+            for (int i = edge + 1; i <= r; ++i) {
+                mul *= size[i];
+            }
+            finishedNum += mul;
+        } else {
+            ++finishedNum;
+        }
+        if (finishedNum > maxNum) {
+            error_handle("array initlist size not match", val->getPos());
+            break;
+        }
+    }
+}
+
 Type VarDef::typeCheck(Table* table) {
     if (array_def_) {
         Type type = array_def_->typeCheck(table);
         if (init_) {
-            Type init_type = init_->typeCheck(table);
-            if (type != init_type) {
-                yyerror(
-                    ("invalid conversion from '" + type.toString() + "' to '" + init_type.toString() + "'").c_str());
-            }
-
-            // delete init if necessary
-            if (init_type.getKind() == TypeKind::ARRAY) {
-                delete init_type.getVal().array;
-            }
+            arrayInitlistTypeCheck(type.getVal().array->size, 0, type.getVal().array->size.size() - 1, init_);
         }
         return type;
     } else if (init_) {
+        if (init_->isList()) {
+            error_handle(("scalar object '" + std::string(name_) + "' requires one element in initializer").c_str(),
+                         pos);
+            return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
+        }
         Type type = init_->typeCheck(table);
         return type;
     } else {
-        return Type(TypeKind::SIMPLE, {SimpleKind::UNKNOWN});
+        return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
     }
 }
 
@@ -234,9 +280,16 @@ Type VarDecl::typeCheck(Table* table) {
     for (auto def : def_list_->getDefs()) {
         Type cur = def->typeCheck(table);
         if (type != cur) {
-            yyerror(("invalid conversion from '" + type.toString() + "' to '" + cur.toString() + "'").c_str());
+            if (cur.getKind() == TypeKind::ARRAY && type == cur.getVal().array->type) {
+                cur.getVal().array->type = type;
+            } else {
+                error_handle(("invalid conversion from '" + type.toString() + "' to '" + cur.toString() + "'").c_str(),
+                             pos);
+            }
+        } else {
+            cur = type;  // update unknown type to real type
         }
-        table->insert(def->getName(), type);
+        table->insert(def->getName(), cur, pos);
     }
     return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
 }
@@ -287,11 +340,11 @@ Type FuncFParam::typeCheck(Table* table) {
         Type arr_type = arr_param_->typeCheck(table);
         type.getVal().array->size = arr_type.getVal().array->size;
         if (type != arr_type.getVal().array->type) {
-            yyerror(("invalid conversion from '" + type.toString() + "' to '" + arr_type.toString() + "'").c_str());
+            error_handle(("invalid conversion from '" + type.toString() + "' to '" + arr_type.toString() + "'").c_str(),
+                         pos);
         }
     }
-    table->insert(name_, type);
-    return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
+    return type;
 }
 
 void FuncFParam::print(int indent, bool last) {
@@ -314,6 +367,13 @@ Type Block::typeCheck(Table* table) {
     return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
 }
 
+Type Block::typeCheckWithoutScope(Table* table) {
+    for (auto stmt : stmts_) {
+        stmt->typeCheck(table);
+    }
+    return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
+}
+
 void Block::print(int indent, bool last) {
     printIndent(indent, last);
     printf("Block\n");
@@ -326,15 +386,24 @@ Type FuncDef::typeCheck(Table* table) {
     Type type = Type(TypeKind::FUNC, TypeVal{.func = new FuncVal()});
     type.getVal().func->ret = ftype_->typeCheck(table);
     if (fparams_) {
-        table->enterScope();
         for (auto fparam : fparams_->getFParams()) {
             type.getVal().func->params.emplace_back(fparam->typeCheck(table));
         }
     }
-    body_->typeCheck(table);
+    table->insert(name_, type, pos);
+
+    table->enterScope();
     if (fparams_) {
-        table->exitScope();
+        for (auto fparam : fparams_->getFParams()) {
+            table->insert(fparam->getName(), fparam->typeCheck(table), pos);
+        }
     }
+
+    table->setReturnType(&type.getVal().func->ret);
+    body_->typeCheckWithoutScope(table);
+    table->setReturnType(nullptr);
+
+    table->exitScope();
     return type;
 }
 
@@ -354,12 +423,19 @@ void FuncDef::print(int indent, bool last) {
 }
 
 Type LVal::typeCheck(Table* table) {
-    Type type = table->lookup(name_);
+    Type type = table->lookup(name_, pos);
     if (arr_) {
         if (type.getKind() != TypeKind::ARRAY) {
-            yyerror(("invalid types '" + type.toString() + "' for array subscript").c_str());
-        } else if (arr_->getDims().size() != type.getVal().array->size.size()) {
-            yyerror(("invalid types '" + type.toString() + "' for array subscript").c_str());
+            error_handle(("invalid types '" + type.toString() + "' for array subscript").c_str(), pos);
+            return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
+        }
+
+        for (size_t i = 0; i < arr_->getDims().size(); ++i) {
+            Type dim = arr_->getDims()[i]->typeCheck(table);
+            if (dim.getKind() != TypeKind::SIMPLE || dim.getVal().simple != SimpleKind::INT) {
+                error_handle(("invalid types '" + dim.toString() + "' for array subscript").c_str(),
+                             arr_->getDims()[i]->getPos());
+            }
         }
         return type.getVal().array->type;
     }
@@ -380,7 +456,7 @@ Type AssignStmt::typeCheck(Table* table) {
     Type lval = lhs_->typeCheck(table);
     Type expr = rhs_->typeCheck(table);
     if (lval != expr) {
-        yyerror(("invalid conversion from '" + lval.toString() + "' to '" + expr.toString() + "'").c_str());
+        error_handle(("invalid conversion from '" + lval.toString() + "' to '" + expr.toString() + "'").c_str(), pos);
     }
     return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
 }
@@ -395,7 +471,7 @@ void AssignStmt::print(int indent, bool last) {
 Type IfStmt::typeCheck(Table* table) {
     Type cond = cond_->typeCheck(table);
     if (cond.getKind() != TypeKind::SIMPLE || cond.getVal().simple != SimpleKind::INT) {
-        yyerror(("invalid conversion from '" + cond.toString() + "' to 'int'").c_str());
+        error_handle(("invalid conversion from '" + cond.toString() + "' to 'int'").c_str(), pos);
     }
     then_->typeCheck(table);
     if (els_) {
@@ -417,7 +493,7 @@ void IfStmt::print(int indent, bool last) {
 Type WhileStmt::typeCheck(Table* table) {
     Type cond = cond_->typeCheck(table);
     if (cond.getKind() != TypeKind::SIMPLE || cond.getVal().simple != SimpleKind::INT) {
-        yyerror(("invalid conversion from '" + cond.toString() + "' to 'int'").c_str());
+        error_handle(("invalid conversion from '" + cond.toString() + "' to 'int'").c_str(), pos);
     }
     body_->typeCheck(table);
     return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
@@ -437,7 +513,24 @@ Type ReturnStmt::typeCheck(Table* table) {
     } else {
         ret = Type(TypeKind::SIMPLE, {SimpleKind::VOID});
     }
-    // TODO: check return type
+
+    if (!table->getReturnType()) {
+        error_handle("expected unqualified-id before 'return'", pos);
+    } else if (*table->getReturnType() != ret) {
+        if (*table->getReturnType() == Type(TypeKind::SIMPLE, {SimpleKind::VOID})) {
+            error_handle("return-statement with a value, in function returning '\033[1mvoid\033[0m'", ret_->getPos());
+        } else if (ret == Type(TypeKind::SIMPLE, {SimpleKind::VOID})) {
+            error_handle(("return-statement with no value, in function returning '\033[1m" +
+                          table->getReturnType()->toString() + "\033[0m'")
+                             .c_str(),
+                         pos);
+        } else {
+            error_handle(
+                ("invalid conversion from '" + ret.toString() + "' to '" + table->getReturnType()->toString() + "'")
+                    .c_str(),
+                ret_ ? ret_->getPos() : pos);
+        }
+    }
     return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
 }
 
@@ -450,19 +543,20 @@ void ReturnStmt::print(int indent, bool last) {
 }
 
 Type CallExp::typeCheck(Table* table) {
-    Type type = table->lookup(name_);
+    Type type = table->lookup(name_, pos);
     if (params_) {
         if (type.getKind() != TypeKind::FUNC) {
-            yyerror(("'" + std::string(name_) + "' cannot be used as a function").c_str());
+            error_handle(("'" + std::string(name_) + "' cannot be used as a function").c_str(), pos);
         } else if (type.getVal().func->params.size() != params_->getParams().size()) {
-            yyerror(("no matching function for call to '" + std::string(name_) + "'").c_str());
+            error_handle(("no matching function for call to '" + std::string(name_) + "'").c_str(), pos);
         } else {
             for (size_t i = 0; i < params_->getParams().size(); ++i) {
                 Type param = params_->getParams()[i]->typeCheck(table);
                 if (type.getVal().func->params[i] != param) {
-                    yyerror(("invalid conversion from '" + param.toString() + "' to '" +
-                             type.getVal().func->params[i].toString() + "'")
-                                .c_str());
+                    error_handle(("invalid conversion from '" + param.toString() + "' to '" +
+                                  type.getVal().func->params[i].toString() + "'")
+                                     .c_str(),
+                                 pos);
                 }
             }
         }
@@ -481,7 +575,7 @@ void CallExp::print(int indent, bool last) {
 Type UnaryExp::typeCheck(Table* table) {
     Type type = exp_->typeCheck(table);
     if (type.getKind() != TypeKind::SIMPLE || type.getVal().simple != SimpleKind::INT) {
-        yyerror(("invalid conversion from '" + type.toString() + "' to 'int'").c_str());
+        error_handle(("invalid conversion from '" + type.toString() + "' to 'int'").c_str(), pos);
     }
     return type;
 }
@@ -496,7 +590,7 @@ Type BinaryExp::typeCheck(Table* table) {
     Type lhs = lhs_->typeCheck(table);
     Type rhs = rhs_->typeCheck(table);
     if (lhs != rhs) {
-        yyerror(("invalid conversion from '" + rhs.toString() + "' to '" + lhs.toString() + "'").c_str());
+        error_handle(("invalid conversion from '" + rhs.toString() + "' to '" + lhs.toString() + "'").c_str(), pos);
     }
     return lhs;
 }
@@ -512,7 +606,7 @@ Type RelExp::typeCheck(Table* table) {
     Type lhs = lhs_->typeCheck(table);
     Type rhs = rhs_->typeCheck(table);
     if (lhs != rhs) {
-        yyerror(("invalid conversion from '" + rhs.toString() + "' to '" + lhs.toString() + "'").c_str());
+        error_handle(("invalid conversion from '" + rhs.toString() + "' to '" + lhs.toString() + "'").c_str(), pos);
     }
     return Type(TypeKind::SIMPLE, {SimpleKind::INT});
 }
@@ -528,10 +622,10 @@ Type LogicExp::typeCheck(Table* table) {
     Type lhs = lhs_->typeCheck(table);
     Type rhs = rhs_->typeCheck(table);
     if (lhs.getKind() != TypeKind::SIMPLE || lhs.getVal().simple != SimpleKind::INT) {
-        yyerror(("invalid conversion from '" + lhs.toString() + "' to 'int'").c_str());
+        error_handle(("invalid conversion from '" + lhs.toString() + "' to 'int'").c_str(), pos);
     }
     if (rhs.getKind() != TypeKind::SIMPLE || rhs.getVal().simple != SimpleKind::INT) {
-        yyerror(("invalid conversion from '" + rhs.toString() + "' to 'int'").c_str());
+        error_handle(("invalid conversion from '" + rhs.toString() + "' to 'int'").c_str(), pos);
     }
     return Type(TypeKind::SIMPLE, {SimpleKind::INT});
 }

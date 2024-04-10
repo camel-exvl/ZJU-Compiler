@@ -9,14 +9,27 @@
 #include <unordered_map>
 #include <stdexcept>
 
+/* Location type.  */
+#if !defined YYLTYPE && !defined YYLTYPE_IS_DECLARED
+typedef struct YYLTYPE YYLTYPE;
+struct YYLTYPE {
+    int first_line;
+    int first_column;
+    int last_line;
+    int last_column;
+};
+#define YYLTYPE_IS_DECLARED 1
+#define YYLTYPE_IS_TRIVIAL 1
+#endif
+
 class Type;
 class Table;
 
-extern void yyerror(const char *s);
+extern void error_handle(const char *s, YYLTYPE pos);
 extern Table *globalTable;
 
-enum class SimpleKind { SCOPE, UNKNOWN, INT, VOID };
-enum class TypeKind { SIMPLE, ARRAY, FUNC };
+enum class SimpleKind { SCOPE, INT, VOID };
+enum class TypeKind { UNKNOWN, SIMPLE, ARRAY, FUNC };
 
 struct ARRAYVAL;
 struct FUNCVAL;
@@ -30,13 +43,13 @@ static std::vector<bool> lastFlags(8, false);
 
 class Type {
    public:
-    Type() : kind_(TypeKind::SIMPLE), val_({SimpleKind::UNKNOWN}) {}
+    Type() : kind_(TypeKind::UNKNOWN), val_({SimpleKind::VOID}) {}
     Type(TypeKind kind, TypeVal val_) : kind_(kind), val_(val_) {}
 
     bool operator==(const Type &other) const;
     bool operator!=(const Type &other) const { return !(*this == other); }
     bool isScope() const { return kind_ == TypeKind::SIMPLE && val_.simple == SimpleKind::SCOPE; }
-    std::string toString();
+    std::string toString(std::string name = "");
 
     TypeKind getKind() { return kind_; }
     void setKind(TypeKind kind) { kind_ = kind; }
@@ -62,33 +75,41 @@ class Table {
    public:
     Table() {}
 
-    void insert(const char *name, Type type);
-    Type lookup(const char *name);
-    void enterScope() {
-        undo_.push(std::string());
-    }
+    void insert(const char *name, Type type, YYLTYPE pos);
+    Type lookup(const char *name, YYLTYPE pos);
+    void enterScope();
     void exitScope();
+    void setReturnType(Type *type) { return_type_ = type; }
+    Type *getReturnType() { return return_type_; }
 
    private:
-    std::unordered_map<std::string, std::stack<Type>> table_;
-    std::stack<std::string> undo_;
+    std::unordered_map<std::string, std::list<Type>> table_;
+    Type *return_type_;
 };
 
 class BaseStmt {
    public:
+    BaseStmt(YYLTYPE pos) : pos(pos) {}
     virtual ~BaseStmt() {}
     virtual Type typeCheck(Table *table) = 0;
     virtual void print(int indent = 0, bool last = false) = 0;
     static void printIndent(int indent = 0, bool last = false);
+    YYLTYPE getPos() { return pos; }
+
+   protected:
+    YYLTYPE pos;
 };
 
-class Exp : public BaseStmt {};
+class Exp : public BaseStmt {
+   public:
+    Exp(YYLTYPE pos) : BaseStmt(pos) {}
+};
 
 class Ident : public Exp {
    public:
-    Ident(const char *name) : name_(name) {}
+    Ident(YYLTYPE pos, const char *name) : Exp(pos), name_(name) {}
 
-    Type typeCheck(Table *table) override { return table->lookup(name_); }
+    Type typeCheck(Table *table) override { return table->lookup(name_, pos); }
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
         printf("Ident: %s\n", name_);
@@ -100,7 +121,7 @@ class Ident : public Exp {
 
 class IntConst : public Exp {
    public:
-    IntConst(int val) : val_(val) {}
+    IntConst(YYLTYPE pos, int val) : Exp(pos), val_(val) {}
 
     Type typeCheck(Table *table) override { return Type(TypeKind::SIMPLE, {SimpleKind::INT}); }
     int getValue() { return val_; }
@@ -115,7 +136,7 @@ class IntConst : public Exp {
 
 class ExprStmt : public BaseStmt {
    public:
-    ExprStmt(Exp *expr) : expr_(expr) {}
+    ExprStmt(YYLTYPE pos, Exp *expr) : BaseStmt(pos), expr_(expr) {}
     ~ExprStmt() { delete expr_; }
 
     Type typeCheck(Table *table) override { return expr_->typeCheck(table); }
@@ -130,7 +151,7 @@ class ExprStmt : public BaseStmt {
 
 class CompUnit : public BaseStmt {
    public:
-    CompUnit(BaseStmt *stmt) { stmts_.push_back(stmt); }
+    CompUnit(YYLTYPE pos, BaseStmt *stmt) : BaseStmt(pos) { stmts_.push_back(stmt); }
     ~CompUnit() {
         for (auto stmt : stmts_) {
             delete stmt;
@@ -147,7 +168,7 @@ class CompUnit : public BaseStmt {
 
 class TypeDecl : public BaseStmt {
    public:
-    TypeDecl(Type type) : type_(type) {}
+    TypeDecl(YYLTYPE pos, Type type) : BaseStmt(pos), type_(type) {}
 
     Type typeCheck(Table *table) override { return type_; }
     void print(int indent = 0, bool last = false) override { printf("%s", type_.toString().c_str()); }
@@ -158,13 +179,15 @@ class TypeDecl : public BaseStmt {
 
 class InitVal : public BaseStmt {
    public:
-    InitVal(BaseStmt *val, bool is_list_) : val_(val), is_list_(is_list_) {}
+    InitVal(YYLTYPE pos, BaseStmt *val, bool is_list_) : BaseStmt(pos), val_(val), is_list_(is_list_) {}
     ~InitVal() { delete val_; }
 
     Type typeCheck(Table *table) override {
-        return val_ ? val_->typeCheck(table) : Type(TypeKind::SIMPLE, {SimpleKind::UNKNOWN});
+        return val_ ? val_->typeCheck(table) : Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
     }
     void print(int indent = 0, bool last = false) override;
+    bool isList() { return is_list_; }
+    BaseStmt *getVal() { return val_; }
 
    private:
     BaseStmt *val_;
@@ -173,14 +196,14 @@ class InitVal : public BaseStmt {
 
 class InitValList : public BaseStmt {
    public:
-    InitValList() {}
+    InitValList(YYLTYPE pos) : BaseStmt(pos) {}
     ~InitValList() {
         for (auto init_val : init_vals_) {
             delete init_val;
         }
     }
 
-    Type typeCheck(Table *table) override;
+    Type typeCheck(Table *table) override { throw std::runtime_error("InitValList typeCheck is never called"); }
     void print(int indent = 0, bool last = false) override {
         for (auto init_val : init_vals_) {
             init_val->print(indent, init_val == init_vals_.back());
@@ -188,6 +211,7 @@ class InitValList : public BaseStmt {
     }
     void append(InitVal *init_val) { init_vals_.push_back(init_val); }
     void appendHead(InitVal *init_val) { init_vals_.insert(init_vals_.begin(), init_val); }
+    std::vector<InitVal *> &getInitVals() { return init_vals_; }
 
    private:
     std::vector<InitVal *> init_vals_;
@@ -195,7 +219,7 @@ class InitValList : public BaseStmt {
 
 class ArrayDef : public BaseStmt {
    public:
-    ArrayDef() {}
+    ArrayDef(YYLTYPE pos) : BaseStmt(pos) {}
     ~ArrayDef() {
         for (auto dim : dims_) {
             delete dim;
@@ -208,7 +232,7 @@ class ArrayDef : public BaseStmt {
             dim->print(indent, last && dim == dims_.back());
         }
     }
-    void append(int dim) { dims_.push_back(new IntConst(dim)); }
+    void append(YYLTYPE pos, int dim) { dims_.push_back(new IntConst(pos, dim)); }
 
    private:
     std::vector<IntConst *> dims_;
@@ -216,7 +240,8 @@ class ArrayDef : public BaseStmt {
 
 class VarDef : public BaseStmt {
    public:
-    VarDef(const char *name, ArrayDef *array_def, InitVal *init) : name_(name), array_def_(array_def), init_(init) {}
+    VarDef(YYLTYPE pos, const char *name, ArrayDef *array_def, InitVal *init)
+        : BaseStmt(pos), name_(name), array_def_(array_def), init_(init) {}
     ~VarDef() {
         delete array_def_;
         delete init_;
@@ -234,7 +259,7 @@ class VarDef : public BaseStmt {
 
 class VarDefList : public BaseStmt {
    public:
-    VarDefList() {}
+    VarDefList(YYLTYPE pos) : BaseStmt(pos) {}
     ~VarDefList() {
         for (auto def : defs_) {
             delete def;
@@ -248,7 +273,7 @@ class VarDefList : public BaseStmt {
         }
     }
     void append(VarDef *def) { defs_.push_back(def); }
-    std::vector<VarDef *> getDefs() { return defs_; }
+    std::vector<VarDef *> &getDefs() { return defs_; }
 
    private:
     std::vector<VarDef *> defs_;
@@ -256,7 +281,7 @@ class VarDefList : public BaseStmt {
 
 class VarDecl : public BaseStmt {
    public:
-    VarDecl(TypeDecl *type, VarDefList *def_list) : type_(type), def_list_(def_list) {}
+    VarDecl(YYLTYPE pos, TypeDecl *type, VarDefList *def_list) : BaseStmt(pos), type_(type), def_list_(def_list) {}
     ~VarDecl() {
         delete type_;
         delete def_list_;
@@ -272,7 +297,7 @@ class VarDecl : public BaseStmt {
 
 class FuncFArrParam : public BaseStmt {
    public:
-    FuncFArrParam() { dims_.push_back(nullptr); }
+    FuncFArrParam(YYLTYPE pos) : BaseStmt(pos) { dims_.push_back(nullptr); }
     ~FuncFArrParam() {
         for (auto dim : dims_) {
             delete dim;
@@ -281,7 +306,7 @@ class FuncFArrParam : public BaseStmt {
 
     Type typeCheck(Table *table) override;
     void print(int indent = 0, bool last = false) override;
-    void append(int dim) { dims_.push_back(new IntConst(dim)); }
+    void append(YYLTYPE pos, int dim) { dims_.push_back(new IntConst(pos, dim)); }
 
    private:
     std::vector<IntConst *> dims_;
@@ -289,8 +314,8 @@ class FuncFArrParam : public BaseStmt {
 
 class FuncFParam : public BaseStmt {
    public:
-    FuncFParam(TypeDecl *ftype, const char *name, FuncFArrParam *arr_param_)
-        : ftype_(ftype), name_(name), arr_param_(arr_param_) {}
+    FuncFParam(YYLTYPE pos, TypeDecl *ftype, const char *name, FuncFArrParam *arr_param_)
+        : BaseStmt(pos), ftype_(ftype), name_(name), arr_param_(arr_param_) {}
     ~FuncFParam() {
         delete ftype_;
         delete arr_param_;
@@ -298,6 +323,7 @@ class FuncFParam : public BaseStmt {
 
     Type typeCheck(Table *table) override;
     void print(int indent = 0, bool last = false) override;
+    const char *getName() { return name_; }
 
    private:
     TypeDecl *ftype_;
@@ -307,7 +333,7 @@ class FuncFParam : public BaseStmt {
 
 class FuncFParams : public BaseStmt {
    public:
-    FuncFParams() {}
+    FuncFParams(YYLTYPE pos) : BaseStmt(pos) {}
     ~FuncFParams() {
         for (auto fparam : fparams_) {
             delete fparam;
@@ -321,7 +347,7 @@ class FuncFParams : public BaseStmt {
         }
     }
     void append(FuncFParam *fparam) { fparams_.push_back(fparam); }
-    std::vector<FuncFParam *> getFParams() { return fparams_; }
+    std::vector<FuncFParam *> &getFParams() { return fparams_; }
 
    private:
     std::vector<FuncFParam *> fparams_;
@@ -329,7 +355,7 @@ class FuncFParams : public BaseStmt {
 
 class Block : public BaseStmt {
    public:
-    Block() {}
+    Block(YYLTYPE pos) : BaseStmt(pos) {}
     ~Block() {
         for (auto stmt : stmts_) {
             delete stmt;
@@ -337,6 +363,7 @@ class Block : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
+    Type typeCheckWithoutScope(Table *table);
     void print(int indent = 0, bool last = false) override;
     void append(BaseStmt *stmt) { stmts_.push_back(stmt); }
 
@@ -346,8 +373,8 @@ class Block : public BaseStmt {
 
 class FuncDef : public BaseStmt {
    public:
-    FuncDef(TypeDecl *ftype, const char *name, FuncFParams *fparams, Block *body)
-        : ftype_(ftype), name_(name), fparams_(fparams), body_(body) {}
+    FuncDef(YYLTYPE pos, TypeDecl *ftype, const char *name, FuncFParams *fparams, Block *body)
+        : BaseStmt(pos), ftype_(ftype), name_(name), fparams_(fparams), body_(body) {}
     ~FuncDef() {
         delete ftype_;
         delete fparams_;
@@ -366,7 +393,7 @@ class FuncDef : public BaseStmt {
 
 class LArrVal : public BaseStmt {
    public:
-    LArrVal() {}
+    LArrVal(YYLTYPE pos) : BaseStmt(pos) {}
     ~LArrVal() {
         for (auto exp : dims_) {
             delete exp;
@@ -380,7 +407,7 @@ class LArrVal : public BaseStmt {
         }
     }
     void append(Exp *dim) { dims_.push_back(dim); }
-    std::vector<Exp *> getDims() { return dims_; }
+    std::vector<Exp *> &getDims() { return dims_; }
 
    private:
     std::vector<Exp *> dims_;
@@ -388,8 +415,8 @@ class LArrVal : public BaseStmt {
 
 class LVal : public Exp {
    public:
-    LVal(const char *name) : name_(name), arr_(nullptr) {}
-    LVal(const char *name, LArrVal *arr) : name_(name), arr_(arr) {}
+    LVal(YYLTYPE pos, const char *name) : Exp(pos), name_(name), arr_(nullptr) {}
+    LVal(YYLTYPE pos, const char *name, LArrVal *arr) : Exp(pos), name_(name), arr_(arr) {}
     ~LVal() { delete arr_; }
 
     Type typeCheck(Table *table) override;
@@ -402,7 +429,7 @@ class LVal : public Exp {
 
 class AssignStmt : public BaseStmt {
    public:
-    AssignStmt(LVal *lhs, Exp *rhs) : lhs_(lhs), rhs_(rhs) {}
+    AssignStmt(YYLTYPE pos, LVal *lhs, Exp *rhs) : BaseStmt(pos), lhs_(lhs), rhs_(rhs) {}
     ~AssignStmt() {
         delete lhs_;
         delete rhs_;
@@ -418,6 +445,8 @@ class AssignStmt : public BaseStmt {
 
 class EmptyStmt : public BaseStmt {
    public:
+    EmptyStmt(YYLTYPE pos) : BaseStmt(pos) {}
+
     Type typeCheck(Table *table) override { return Type(TypeKind::SIMPLE, {SimpleKind::VOID}); }
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
@@ -427,7 +456,7 @@ class EmptyStmt : public BaseStmt {
 
 class ExpStmt : public BaseStmt {
    public:
-    ExpStmt(Exp *expr) : expr_(expr) {}
+    ExpStmt(YYLTYPE pos, Exp *expr) : BaseStmt(pos), expr_(expr) {}
     ~ExpStmt() { delete expr_; }
 
     Type typeCheck(Table *table) override {
@@ -446,8 +475,9 @@ class ExpStmt : public BaseStmt {
 
 class IfStmt : public BaseStmt {
    public:
-    IfStmt(Exp *cond, BaseStmt *then) : cond_(cond), then_(then), els_(nullptr) {}
-    IfStmt(Exp *cond, BaseStmt *then, BaseStmt *els) : cond_(cond), then_(then), els_(els) {}
+    IfStmt(YYLTYPE pos, Exp *cond, BaseStmt *then) : BaseStmt(pos), cond_(cond), then_(then), els_(nullptr) {}
+    IfStmt(YYLTYPE pos, Exp *cond, BaseStmt *then, BaseStmt *els)
+        : BaseStmt(pos), cond_(cond), then_(then), els_(els) {}
     ~IfStmt() {
         delete cond_;
         delete then_;
@@ -465,7 +495,7 @@ class IfStmt : public BaseStmt {
 
 class WhileStmt : public BaseStmt {
    public:
-    WhileStmt(Exp *cond, BaseStmt *body) : cond_(cond), body_(body) {}
+    WhileStmt(YYLTYPE pos, Exp *cond, BaseStmt *body) : BaseStmt(pos), cond_(cond), body_(body) {}
     ~WhileStmt() {
         delete cond_;
         delete body_;
@@ -481,8 +511,8 @@ class WhileStmt : public BaseStmt {
 
 class ReturnStmt : public BaseStmt {
    public:
-    ReturnStmt() : ret_(nullptr) {}
-    ReturnStmt(Exp *ret) : ret_(ret) {}
+    ReturnStmt(YYLTYPE pos) : BaseStmt(pos), ret_(nullptr) {}
+    ReturnStmt(YYLTYPE pos, Exp *ret) : BaseStmt(pos), ret_(ret) {}
     ~ReturnStmt() { delete ret_; }
 
     Type typeCheck(Table *table) override;
@@ -494,7 +524,7 @@ class ReturnStmt : public BaseStmt {
 
 class PrimaryExp : public Exp {
    public:
-    PrimaryExp(Exp *exp) : exp_(exp) {}
+    PrimaryExp(YYLTYPE pos, Exp *exp) : Exp(pos), exp_(exp) {}
     ~PrimaryExp() { delete exp_; }
 
     Type typeCheck(Table *table) override { return exp_->typeCheck(table); }
@@ -506,7 +536,7 @@ class PrimaryExp : public Exp {
 
 class FuncRParams : public BaseStmt {
    public:
-    FuncRParams() {}
+    FuncRParams(YYLTYPE pos) : BaseStmt(pos) {}
     ~FuncRParams() {
         for (auto param : params_) {
             delete param;
@@ -520,7 +550,7 @@ class FuncRParams : public BaseStmt {
         }
     }
     void append(Exp *param) { params_.push_back(param); }
-    std::vector<Exp *> getParams() { return params_; }
+    std::vector<Exp *> &getParams() { return params_; }
 
    private:
     std::vector<Exp *> params_;
@@ -528,8 +558,8 @@ class FuncRParams : public BaseStmt {
 
 class CallExp : public Exp {
    public:
-    CallExp(const char *name) : name_(name), params_(nullptr) {}
-    CallExp(const char *name, FuncRParams *params) : name_(name), params_(params) {}
+    CallExp(YYLTYPE pos, const char *name) : Exp(pos), name_(name), params_(nullptr) {}
+    CallExp(YYLTYPE pos, const char *name, FuncRParams *params) : Exp(pos), name_(name), params_(params) {}
     ~CallExp() { delete params_; }
 
     Type typeCheck(Table *table) override;
@@ -542,7 +572,7 @@ class CallExp : public Exp {
 
 class UnaryExp : public Exp {
    public:
-    UnaryExp(const char *&op, Exp *exp) : op_(op), exp_(exp) {}
+    UnaryExp(YYLTYPE pos, const char *&op, Exp *exp) : Exp(pos), op_(op), exp_(exp) {}
     ~UnaryExp() { delete exp_; }
 
     Type typeCheck(Table *table) override;
@@ -555,7 +585,7 @@ class UnaryExp : public Exp {
 
 class BinaryExp : public Exp {
    public:
-    BinaryExp(Exp *lhs, Exp *rhs, const char *op) : lhs_(lhs), rhs_(rhs), op_(op) {}
+    BinaryExp(YYLTYPE pos, Exp *lhs, Exp *rhs, const char *op) : Exp(pos), lhs_(lhs), rhs_(rhs), op_(op) {}
     ~BinaryExp() {
         delete lhs_;
         delete rhs_;
@@ -571,7 +601,7 @@ class BinaryExp : public Exp {
 
 class RelExp : public Exp {
    public:
-    RelExp(Exp *lhs, Exp *rhs, const char *op) : lhs_(lhs), rhs_(rhs), op_(op) {}
+    RelExp(YYLTYPE pos, Exp *lhs, Exp *rhs, const char *op) : Exp(pos), lhs_(lhs), rhs_(rhs), op_(op) {}
     ~RelExp() {
         delete lhs_;
         delete rhs_;
@@ -587,7 +617,7 @@ class RelExp : public Exp {
 
 class LogicExp : public Exp {
    public:
-    LogicExp(Exp *lhs, Exp *rhs, const char *op) : lhs_(lhs), rhs_(rhs), op_(op) {}
+    LogicExp(YYLTYPE pos, Exp *lhs, Exp *rhs, const char *op) : Exp(pos), lhs_(lhs), rhs_(rhs), op_(op) {}
     ~LogicExp() {
         delete lhs_;
         delete rhs_;

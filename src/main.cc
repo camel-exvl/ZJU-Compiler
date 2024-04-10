@@ -26,13 +26,13 @@ int main(int argc, char** argv) {
     yylineno = 1;
     yyrestart(file);
     yyparse();
-    if (errorFlag) {
-        return 1;
-    }
     if (root) {
         root->print();
         root->typeCheck(globalTable);
         delete root;
+    }
+    if (errorFlag) {
+        return -1;
     }
     return 0;
 }
