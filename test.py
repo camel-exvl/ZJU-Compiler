@@ -57,7 +57,9 @@ class Test:
         elif len(comments) == 2:  # input and output
             assert "Input:" in comments[0], f"Error: {filename} has non-paired input/output"
             assert "Output:" in comments[1], f"Error: {filename} has non-paired input/output"
-            input = comments[0].replace("Input:", "").strip().split().remove('None')
+            input = comments[0].replace("Input:", "").strip().split()
+            if input[0] == "None":
+                input = None
             expected = comments[1].replace("Output:", "").strip().split()
             return Test(filename, input, expected, False)
         else:
