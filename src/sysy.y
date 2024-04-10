@@ -4,6 +4,7 @@
 
 %{
 #include <cstdio>
+#include <cstring>
 void yyerror(const char *s);
 extern int yylex(void);
 #include "ast.h"
@@ -153,7 +154,7 @@ UnaryOp : PLUS { $$ = "+"; }
         | MINUS { $$ = "-"; }
         | NOT { $$ = "!"; }
 FuncRParams : Exp { $$ = new FuncRParams(@1); $$->append($1); }
-        | Exp COMMA FuncRParams { $$ = $3; $$->append($1); }
+        | Exp COMMA FuncRParams { $$ = $3; $$->appendHead($1); }
 
 MulExp : UnaryExp { $$ = $1; }
         | MulExp MUL UnaryExp { $$ = new BinaryExp(@2, $1, $3, "*"); }
@@ -205,6 +206,9 @@ void yyerror(const char *s) {
     fprintf(stderr, "%.*s", yycolumn - yyleng - 1, lineptr);
     fprintf(stderr, "\033[1;31m%.*s\033[0m", yyleng, lineptr + yycolumn - yyleng - 1);
     fprintf(stderr, "%s", lineptr + yycolumn - 1);
+    if (lineptr[strlen(lineptr) - 1] != '\n') { // if the line is not end with '\n', print a '\n'
+        fprintf(stderr, "\n");
+    }
 
     fprintf(stderr, "%*c| \033[1;31m%*c", spaceLen - 2, ' ', yycolumn - yyleng, '^');
     for (int i = 1; i < yyleng; i++) {

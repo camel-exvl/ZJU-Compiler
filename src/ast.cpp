@@ -35,31 +35,35 @@ bool Type::operator==(const Type& other) const {
 }
 
 std::string Type::toString(std::string name) {
-    if (!name.empty()) {
-        name = " " + name;
-    }
-
     if (kind_ == TypeKind::UNKNOWN) {
-        return "unknown" + name;
+        return "unknown";
     } else if (kind_ == TypeKind::SIMPLE) {
         switch (val_.simple) {
             case SimpleKind::INT:
-                return "int" + name;
+                return "int";
             case SimpleKind::VOID:
-                return "void" + name;
+                return "void";
             case SimpleKind::SCOPE:
-                return "scope" + name;
+                return "scope";
             default:
-                return "error" + name;
+                return "error";
         }
     } else if (kind_ == TypeKind::ARRAY) {
         std::string ret = val_.array->type.toString();
-        for (auto size : val_.array->size) {
-            ret += "[" + std::to_string(size) + "]";
+        if (val_.array->size[0] == -1) {  // pointer
+            if (val_.array->size.size() == 1) {
+                ret += " *";
+            } else {
+                ret += " (*)";
+            }
         }
-        return ret + name;
+
+        for (size_t i = val_.array->size[0] == -1; i < val_.array->size.size(); ++i) {
+            ret += "[" + std::to_string(val_.array->size[i]) + "]";
+        }
+        return ret;
     } else if (kind_ == TypeKind::FUNC) {
-        std::string ret = val_.func->ret.toString() + name + "(";
+        std::string ret = val_.func->ret.toString() + " " + name + "(";
         for (size_t i = 0; i < val_.func->params.size(); ++i) {
             ret += val_.func->params[i].toString();
             if (i != val_.func->params.size() - 1) {
@@ -78,10 +82,15 @@ void Table::insert(const char* name, Type type, YYLTYPE pos) {
         table_[name] = std::list<Type>();
         table_[name].emplace_back(Type(TypeKind::SIMPLE, {SimpleKind::SCOPE}));
     } else if (!table_[name].back().isScope()) {
+        std::string s = type.toString(name);
+        if (type.getKind() != TypeKind::FUNC) {
+            s += " " + std::string(name);
+        }
+
         if (table_[name].back() == type) {
-            error_handle(("redefinition of '" + type.toString(name) + "'").c_str(), pos);
+            error_handle(("redefinition of '\033[1m" + s + "\033[0m'").c_str(), pos);
         } else {
-            error_handle(("conflicting declaration '" + type.toString(name) + "'").c_str(), pos);
+            error_handle(("conflicting declaration '\033[1m" + s + "\033[0m'").c_str(), pos);
         }
         return;
     }
@@ -90,7 +99,7 @@ void Table::insert(const char* name, Type type, YYLTYPE pos) {
 
 Type Table::lookup(const char* name, YYLTYPE pos) {
     if (!table_.count(name)) {
-        error_handle(("'" + std::string(name) + "' was not declared in this scope").c_str(), pos);
+        error_handle(("'\033[1m" + std::string(name) + "\033[0m' was not declared in this scope").c_str(), pos);
         return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
     }
     for (auto it = table_[name].rbegin(); it != table_[name].rend(); ++it) {
@@ -98,7 +107,7 @@ Type Table::lookup(const char* name, YYLTYPE pos) {
             return *it;
         }
     }
-    error_handle(("'" + std::string(name) + "' was not declared in this scope").c_str(), pos);
+    error_handle(("'\033[1m" + std::string(name) + "\033[0m' was not declared in this scope").c_str(), pos);
     return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
 }
 
@@ -199,7 +208,6 @@ Type ArrayDef::typeCheck(Table* table) {
     return type;
 }
 
-// TODO: need test
 void arrayInitlistTypeCheck(std::vector<int>& size, int l, int r, InitVal* init) {
     if (!init->getVal()) {
         return;
@@ -217,7 +225,7 @@ void arrayInitlistTypeCheck(std::vector<int>& size, int l, int r, InitVal* init)
     for (auto val : static_cast<InitValList*>(init->getVal())->getInitVals()) {
         if (val->isList()) {
             if (finishedNum % size[r] != 0) {
-                error_handle("array initlist size not match", val->getPos());
+                error_handle("array initializer must be aligned", val->getPos());
                 return;
             }
 
@@ -236,7 +244,7 @@ void arrayInitlistTypeCheck(std::vector<int>& size, int l, int r, InitVal* init)
             ++finishedNum;
         }
         if (finishedNum > maxNum) {
-            error_handle("array initlist size not match", val->getPos());
+            error_handle("excess elements in array initializer", val->getPos());
             break;
         }
     }
@@ -251,8 +259,16 @@ Type VarDef::typeCheck(Table* table) {
         return type;
     } else if (init_) {
         if (init_->isList()) {
-            error_handle(("scalar object '" + std::string(name_) + "' requires one element in initializer").c_str(),
-                         pos);
+            if (!init_->getVal()) {
+                error_handle("empty scalar initializer", init_->getPos());
+            } else if (static_cast<InitValList*>(init_->getVal())->getInitVals().size() > 1) {
+                error_handle(
+                    ("scalar object '\033[1m" + std::string(name_) + "\033[0m' requires one element in initializer")
+                        .c_str(),
+                    pos);
+            } else {
+                return static_cast<InitValList*>(init_->getVal())->getInitVals()[0]->typeCheck(table);
+            }
             return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
         }
         Type type = init_->typeCheck(table);
@@ -283,22 +299,24 @@ Type VarDecl::typeCheck(Table* table) {
             if (cur.getKind() == TypeKind::ARRAY && type == cur.getVal().array->type) {
                 cur.getVal().array->type = type;
             } else {
-                error_handle(("invalid conversion from '" + type.toString() + "' to '" + cur.toString() + "'").c_str(),
+                error_handle(("invalid conversion from '\033[1m" + type.toString() + "\033[0m' to '\033[1m" +
+                              cur.toString() + "\033[0m'")
+                                 .c_str(),
                              pos);
             }
         } else {
             cur = type;  // update unknown type to real type
         }
-        table->insert(def->getName(), cur, pos);
+        table->insert(def->getName(), cur, def->getPos());
     }
     return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
 }
 
 void VarDecl::print(int indent, bool last) {
     printIndent(indent, last);
-    printf("VarDecl: '");
+    printf("VarDecl: '\033[1m");
     type_->print();
-    printf("'\n");
+    printf("\033[0m'\n");
     def_list_->print(indent + 1, true);
 }
 
@@ -312,11 +330,11 @@ Type FuncFArrParam::typeCheck(Table* table) {
                                                  cur.getVal().array->size.end());
                 type.getVal().array->type = cur.getVal().array->type;
             } else if (cur.getKind() == TypeKind::SIMPLE) {
-                type.getVal().array->size.emplace_back(1);
+                type.getVal().array->size.emplace_back(dim->getValue());
                 type.getVal().array->type = cur;
             }
         } else {
-            type.getVal().array->size.emplace_back(0);
+            type.getVal().array->size.emplace_back(-1);
         }
     }
     return type;
@@ -334,25 +352,28 @@ void FuncFArrParam::print(int indent, bool last) {
 }
 
 Type FuncFParam::typeCheck(Table* table) {
-    Type type = ftype_->typeCheck(table);
     if (arr_param_) {
-        type.setKind(TypeKind::ARRAY);
+        Type type = ftype_->typeCheck(table);
+
         Type arr_type = arr_param_->typeCheck(table);
-        type.getVal().array->size = arr_type.getVal().array->size;
         if (type != arr_type.getVal().array->type) {
-            error_handle(("invalid conversion from '" + type.toString() + "' to '" + arr_type.toString() + "'").c_str(),
+            error_handle(("invalid conversion from '\033[1m" + type.toString() + "\033[0m' to '\033[1m" +
+                          arr_type.toString() + "\033[0m'")
+                             .c_str(),
                          pos);
         }
+        arr_type.getVal().array->type = type;
+        return arr_type;
     }
-    return type;
+    return ftype_->typeCheck(table);
 }
 
 void FuncFParam::print(int indent, bool last) {
     printIndent(indent, last);
     printf("FuncFParam: ");
-    printf(" %s '", name_);
+    printf(" %s '\033[1m", name_);
     ftype_->print();
-    printf("'\n");
+    printf("\033[0m'\n");
     if (arr_param_) {
         arr_param_->print(indent + 1, true);
     }
@@ -411,9 +432,9 @@ void FuncDef::print(int indent, bool last) {
     printIndent(indent, last);
     printf("FuncDef: %s\n", name_);
     printIndent(indent + 1, !(fparams_ || body_));
-    printf("Return type: '");
+    printf("Return type: '\033[1m");
     ftype_->print();
-    printf("'\n");
+    printf("\033[0m'\n");
     if (fparams_) {
         fparams_->print(indent + 1, !body_);
     }
@@ -426,18 +447,28 @@ Type LVal::typeCheck(Table* table) {
     Type type = table->lookup(name_, pos);
     if (arr_) {
         if (type.getKind() != TypeKind::ARRAY) {
-            error_handle(("invalid types '" + type.toString() + "' for array subscript").c_str(), pos);
+            error_handle(("invalid types '\033[1m" + type.toString() + "\033[0m' for array subscript").c_str(), pos);
             return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
         }
 
         for (size_t i = 0; i < arr_->getDims().size(); ++i) {
             Type dim = arr_->getDims()[i]->typeCheck(table);
             if (dim.getKind() != TypeKind::SIMPLE || dim.getVal().simple != SimpleKind::INT) {
-                error_handle(("invalid types '" + dim.toString() + "' for array subscript").c_str(),
+                error_handle(("invalid types '\033[1m" + dim.toString() + "\033[0m' for array subscript").c_str(),
                              arr_->getDims()[i]->getPos());
             }
         }
-        return type.getVal().array->type;
+        if (arr_->getDims().size() == type.getVal().array->size.size()) {
+            return type.getVal().array->type;
+        } else {
+            Type ret = Type(TypeKind::ARRAY, TypeVal{.array = new ArrayVal()});
+            ret.getVal().array->size.emplace_back(-1);
+            for (size_t i = arr_->getDims().size() + 1; i < type.getVal().array->size.size(); ++i) {
+                ret.getVal().array->size.emplace_back(type.getVal().array->size[i]);
+            }
+            ret.getVal().array->type = type.getVal().array->type;
+            return ret;
+        }
     }
     return type;
 }
@@ -456,7 +487,16 @@ Type AssignStmt::typeCheck(Table* table) {
     Type lval = lhs_->typeCheck(table);
     Type expr = rhs_->typeCheck(table);
     if (lval != expr) {
-        error_handle(("invalid conversion from '" + lval.toString() + "' to '" + expr.toString() + "'").c_str(), pos);
+        if (expr.getKind() == TypeKind::ARRAY) {
+            error_handle("invalid array assignment", pos);
+        } else if (expr == Type(TypeKind::SIMPLE, {SimpleKind::VOID})) {
+            error_handle("void value not ignored as it ought to be", pos);
+        } else {
+            error_handle(("invalid conversion from '\033[1m" + lval.toString() + "\033[0m' to '\033[1m" +
+                          expr.toString() + "\033[0m'")
+                             .c_str(),
+                         pos);
+        }
     }
     return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
 }
@@ -471,7 +511,8 @@ void AssignStmt::print(int indent, bool last) {
 Type IfStmt::typeCheck(Table* table) {
     Type cond = cond_->typeCheck(table);
     if (cond.getKind() != TypeKind::SIMPLE || cond.getVal().simple != SimpleKind::INT) {
-        error_handle(("invalid conversion from '" + cond.toString() + "' to 'int'").c_str(), pos);
+        error_handle(("invalid conversion from '\033[1m" + cond.toString() + "\033[1m' to '\033[1mint\033[0m'").c_str(),
+                     pos);
     }
     then_->typeCheck(table);
     if (els_) {
@@ -493,7 +534,8 @@ void IfStmt::print(int indent, bool last) {
 Type WhileStmt::typeCheck(Table* table) {
     Type cond = cond_->typeCheck(table);
     if (cond.getKind() != TypeKind::SIMPLE || cond.getVal().simple != SimpleKind::INT) {
-        error_handle(("invalid conversion from '" + cond.toString() + "' to 'int'").c_str(), pos);
+        error_handle(("invalid conversion from '\033[1m" + cond.toString() + "\033[0m' to '\033[1mint\033[0m'").c_str(),
+                     pos);
     }
     body_->typeCheck(table);
     return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
@@ -515,7 +557,7 @@ Type ReturnStmt::typeCheck(Table* table) {
     }
 
     if (!table->getReturnType()) {
-        error_handle("expected unqualified-id before 'return'", pos);
+        error_handle("expected unqualified-id before '\033[1mreturn\033[0m'", pos);
     } else if (*table->getReturnType() != ret) {
         if (*table->getReturnType() == Type(TypeKind::SIMPLE, {SimpleKind::VOID})) {
             error_handle("return-statement with a value, in function returning '\033[1mvoid\033[0m'", ret_->getPos());
@@ -525,10 +567,10 @@ Type ReturnStmt::typeCheck(Table* table) {
                              .c_str(),
                          pos);
         } else {
-            error_handle(
-                ("invalid conversion from '" + ret.toString() + "' to '" + table->getReturnType()->toString() + "'")
-                    .c_str(),
-                ret_ ? ret_->getPos() : pos);
+            error_handle(("invalid conversion from \033[1m" + ret.toString() + "\033[0m' to '\033[1m" +
+                          table->getReturnType()->toString() + "\033[0m'")
+                             .c_str(),
+                         ret_ ? ret_->getPos() : pos);
         }
     }
     return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
@@ -544,19 +586,28 @@ void ReturnStmt::print(int indent, bool last) {
 
 Type CallExp::typeCheck(Table* table) {
     Type type = table->lookup(name_, pos);
+    if (type.getKind() == TypeKind::UNKNOWN) {  // if not declared
+        return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
+    }
+
     if (params_) {
         if (type.getKind() != TypeKind::FUNC) {
-            error_handle(("'" + std::string(name_) + "' cannot be used as a function").c_str(), pos);
-        } else if (type.getVal().func->params.size() != params_->getParams().size()) {
-            error_handle(("no matching function for call to '" + std::string(name_) + "'").c_str(), pos);
+            error_handle(("'\033[1m" + std::string(name_) + "\033[0m' cannot be used as a function").c_str(), pos);
+            return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
+        } else if (type.getVal().func->params.size() > params_->getParams().size()) {
+            error_handle(("too few arguments to function '\033[1m" + std::string(name_) + "\033[0m'").c_str(), pos);
+            return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
+        } else if (type.getVal().func->params.size() < params_->getParams().size()) {
+            error_handle(("too many arguments to function '\033[1m" + std::string(name_) + "\033[0m'").c_str(), pos);
+            return Type(TypeKind::UNKNOWN, {SimpleKind::VOID});
         } else {
             for (size_t i = 0; i < params_->getParams().size(); ++i) {
                 Type param = params_->getParams()[i]->typeCheck(table);
                 if (type.getVal().func->params[i] != param) {
-                    error_handle(("invalid conversion from '" + param.toString() + "' to '" +
-                                  type.getVal().func->params[i].toString() + "'")
+                    error_handle(("invalid conversion from '\033[1m" + param.toString() + "\033[0m' to '\033[1m" +
+                                  type.getVal().func->params[i].toString() + "\033[0m'")
                                      .c_str(),
-                                 pos);
+                                    params_->getParams()[i]->getPos());
                 }
             }
         }
@@ -575,7 +626,8 @@ void CallExp::print(int indent, bool last) {
 Type UnaryExp::typeCheck(Table* table) {
     Type type = exp_->typeCheck(table);
     if (type.getKind() != TypeKind::SIMPLE || type.getVal().simple != SimpleKind::INT) {
-        error_handle(("invalid conversion from '" + type.toString() + "' to 'int'").c_str(), pos);
+        error_handle(("invalid conversion from '\033[1m" + type.toString() + "\033[0m' to '\033[1mint\033[0m'").c_str(),
+                     pos);
     }
     return type;
 }
@@ -590,7 +642,10 @@ Type BinaryExp::typeCheck(Table* table) {
     Type lhs = lhs_->typeCheck(table);
     Type rhs = rhs_->typeCheck(table);
     if (lhs != rhs) {
-        error_handle(("invalid conversion from '" + rhs.toString() + "' to '" + lhs.toString() + "'").c_str(), pos);
+        error_handle(("invalid operands of types '\033[1m" + lhs.toString() + "\033[0m' and '\033[1m" + rhs.toString() +
+                      "\033[0m' to binary '\033[1moperator" + op_ + "\033[0m'")
+                         .c_str(),
+                     pos);
     }
     return lhs;
 }
@@ -606,7 +661,10 @@ Type RelExp::typeCheck(Table* table) {
     Type lhs = lhs_->typeCheck(table);
     Type rhs = rhs_->typeCheck(table);
     if (lhs != rhs) {
-        error_handle(("invalid conversion from '" + rhs.toString() + "' to '" + lhs.toString() + "'").c_str(), pos);
+        error_handle(
+            ("invalid conversion from '\033[1m" + rhs.toString() + "\033[0m' to '\033[1m" + lhs.toString() + "\033[0m'")
+                .c_str(),
+            pos);
     }
     return Type(TypeKind::SIMPLE, {SimpleKind::INT});
 }
@@ -622,10 +680,12 @@ Type LogicExp::typeCheck(Table* table) {
     Type lhs = lhs_->typeCheck(table);
     Type rhs = rhs_->typeCheck(table);
     if (lhs.getKind() != TypeKind::SIMPLE || lhs.getVal().simple != SimpleKind::INT) {
-        error_handle(("invalid conversion from '" + lhs.toString() + "' to 'int'").c_str(), pos);
+        error_handle(("invalid conversion from '\033[1m" + lhs.toString() + "\033[0m' to '\033[1mint\033[0m'").c_str(),
+                     pos);
     }
     if (rhs.getKind() != TypeKind::SIMPLE || rhs.getVal().simple != SimpleKind::INT) {
-        error_handle(("invalid conversion from '" + rhs.toString() + "' to 'int'").c_str(), pos);
+        error_handle(("invalid conversion from '\033[1m" + rhs.toString() + "\033[0m' to '\033[1mint\033[0m").c_str(),
+                     pos);
     }
     return Type(TypeKind::SIMPLE, {SimpleKind::INT});
 }

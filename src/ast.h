@@ -550,6 +550,7 @@ class FuncRParams : public BaseStmt {
         }
     }
     void append(Exp *param) { params_.push_back(param); }
+    void appendHead(Exp *param) { params_.insert(params_.begin(), param); }
     std::vector<Exp *> &getParams() { return params_; }
 
    private:
