@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
     yyrestart(file);
     yyparse();
     if (root) {
-        root->print();
+        // root->print();
         root->typeCheck(globalTable);
         delete root;
     }

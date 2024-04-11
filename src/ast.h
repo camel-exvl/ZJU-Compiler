@@ -45,15 +45,19 @@ class Type {
    public:
     Type() : kind_(TypeKind::UNKNOWN), val_({SimpleKind::VOID}) {}
     Type(TypeKind kind, TypeVal val_) : kind_(kind), val_(val_) {}
+    Type(const Type &other);
+    Type(Type &&other);
+    ~Type();
 
+    Type &operator=(Type &&other);
     bool operator==(const Type &other) const;
     bool operator!=(const Type &other) const { return !(*this == other); }
     bool isScope() const { return kind_ == TypeKind::SIMPLE && val_.simple == SimpleKind::SCOPE; }
-    std::string toString(std::string name = "");
+    std::string toString(std::string name = "") const;
 
-    TypeKind getKind() { return kind_; }
+    TypeKind getKind() const { return kind_; }
     void setKind(TypeKind kind) { kind_ = kind; }
-    TypeVal getVal() { return val_; }
+    TypeVal getVal() const { return val_; }
     void setVal(TypeVal val) { val_ = val; }
 
    private:
@@ -75,7 +79,7 @@ class Table {
    public:
     Table() {}
 
-    void insert(const char *name, Type type, YYLTYPE pos);
+    void insert(const char *name, const Type &type, YYLTYPE pos);
     Type lookup(const char *name, YYLTYPE pos);
     void enterScope();
     void exitScope();

@@ -1,5 +1,61 @@
 #include "ast.h"
 
+Type::Type(const Type& other) {
+    kind_ = other.kind_;
+    if (kind_ == TypeKind::SIMPLE) {
+        val_.simple = other.val_.simple;
+    } else if (kind_ == TypeKind::ARRAY) {
+        val_.array = new ArrayVal(*other.val_.array);
+    } else if (kind_ == TypeKind::FUNC) {
+        val_.func = new FuncVal(*other.val_.func);
+    }
+}
+
+Type::Type(Type&& other) {
+    kind_ = other.kind_;
+    if (kind_ == TypeKind::SIMPLE) {
+        val_.simple = other.val_.simple;
+    } else if (kind_ == TypeKind::ARRAY) {
+        val_.array = other.val_.array;
+        other.val_.array = nullptr;
+    } else if (kind_ == TypeKind::FUNC) {
+        val_.func = other.val_.func;
+        other.val_.func = nullptr;
+    }
+}
+
+Type::~Type() {
+    if (kind_ == TypeKind::ARRAY) {
+        delete val_.array;
+    } else if (kind_ == TypeKind::FUNC) {
+        delete val_.func;
+    }
+}
+
+Type& Type::operator=(Type&& other) {
+    if (this == &other) {
+        return *this;
+    }
+
+    if (kind_ == TypeKind::ARRAY) {
+        delete val_.array;
+    } else if (kind_ == TypeKind::FUNC) {
+        delete val_.func;
+    }
+
+    kind_ = other.kind_;
+    if (kind_ == TypeKind::SIMPLE) {
+        val_.simple = other.val_.simple;
+    } else if (kind_ == TypeKind::ARRAY) {
+        val_.array = other.val_.array;
+        other.val_.array = nullptr;
+    } else if (kind_ == TypeKind::FUNC) {
+        val_.func = other.val_.func;
+        other.val_.func = nullptr;
+    }
+    return *this;
+}
+
 bool Type::operator==(const Type& other) const {
     if (kind_ == TypeKind::UNKNOWN || other.kind_ == TypeKind::UNKNOWN) {
         return true;
@@ -34,7 +90,7 @@ bool Type::operator==(const Type& other) const {
     throw std::runtime_error("unknown type kind");
 }
 
-std::string Type::toString(std::string name) {
+std::string Type::toString(std::string name) const {
     if (kind_ == TypeKind::UNKNOWN) {
         return "unknown";
     } else if (kind_ == TypeKind::SIMPLE) {
@@ -77,7 +133,7 @@ std::string Type::toString(std::string name) {
     }
 }
 
-void Table::insert(const char* name, Type type, YYLTYPE pos) {
+void Table::insert(const char* name, const Type &type, YYLTYPE pos) {
     if (!table_.count(name)) {
         table_[name] = std::list<Type>();
         table_[name].emplace_back(Type(TypeKind::SIMPLE, {SimpleKind::SCOPE}));
@@ -120,7 +176,7 @@ void Table::enterScope() {
 void Table::exitScope() {
     std::vector<std::string> toDelete;
     for (auto& [name, list] : table_) {
-        while (!list.empty() && !list.back().isScope()) {
+        if (!list.empty() && !list.back().isScope()) {
             list.pop_back();
         }
         list.pop_back();
@@ -297,7 +353,7 @@ Type VarDecl::typeCheck(Table* table) {
         Type cur = def->typeCheck(table);
         if (type != cur) {
             if (cur.getKind() == TypeKind::ARRAY && type == cur.getVal().array->type) {
-                cur.getVal().array->type = type;
+                cur.getVal().array->type = std::move(type);
             } else {
                 error_handle(("invalid conversion from '\033[1m" + type.toString() + "\033[0m' to '\033[1m" +
                               cur.toString() + "\033[0m'")
@@ -305,7 +361,7 @@ Type VarDecl::typeCheck(Table* table) {
                              pos);
             }
         } else {
-            cur = type;  // update unknown type to real type
+            cur = std::move(type);  // update unknown type to real type
         }
         table->insert(def->getName(), cur, def->getPos());
     }
@@ -325,14 +381,14 @@ Type FuncFArrParam::typeCheck(Table* table) {
     for (auto dim : dims_) {
         if (dim) {
             Type cur = dim->typeCheck(table);
-            if (cur.getKind() == TypeKind::ARRAY) {
-                type.getVal().array->size.insert(type.getVal().array->size.end(), cur.getVal().array->size.begin(),
-                                                 cur.getVal().array->size.end());
-                type.getVal().array->type = cur.getVal().array->type;
-            } else if (cur.getKind() == TypeKind::SIMPLE) {
-                type.getVal().array->size.emplace_back(dim->getValue());
-                type.getVal().array->type = cur;
-            }
+            // if (cur.getKind() == TypeKind::ARRAY) {
+            //     type.getVal().array->size.insert(type.getVal().array->size.end(), cur.getVal().array->size.begin(),
+            //                                      cur.getVal().array->size.end());
+            //     type.getVal().array->type = cur.getVal().array->type;
+            // } else if (cur.getKind() == TypeKind::SIMPLE) {
+            type.getVal().array->size.emplace_back(dim->getValue());
+            type.getVal().array->type = std::move(cur);
+            // }
         } else {
             type.getVal().array->size.emplace_back(-1);
         }
@@ -362,7 +418,7 @@ Type FuncFParam::typeCheck(Table* table) {
                              .c_str(),
                          pos);
         }
-        arr_type.getVal().array->type = type;
+        arr_type.getVal().array->type = std::move(type);
         return arr_type;
     }
     return ftype_->typeCheck(table);
@@ -466,7 +522,7 @@ Type LVal::typeCheck(Table* table) {
             for (size_t i = arr_->getDims().size() + 1; i < type.getVal().array->size.size(); ++i) {
                 ret.getVal().array->size.emplace_back(type.getVal().array->size[i]);
             }
-            ret.getVal().array->type = type.getVal().array->type;
+            ret.getVal().array->type = std::move(type.getVal().array->type);
             return ret;
         }
     }
@@ -607,7 +663,7 @@ Type CallExp::typeCheck(Table* table) {
                     error_handle(("invalid conversion from '\033[1m" + param.toString() + "\033[0m' to '\033[1m" +
                                   type.getVal().func->params[i].toString() + "\033[0m'")
                                      .c_str(),
-                                    params_->getParams()[i]->getPos());
+                                 params_->getParams()[i]->getPos());
                 }
             }
         }
