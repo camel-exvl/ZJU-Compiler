@@ -2,12 +2,12 @@
 // Output: 4 2
 
 void fundiv() {
-    int a, b;
-    a = read();
-    b = read();
-    write(a/b);
+  int a, b;
+  a = read();
+  b = read();
+  write(a / b);
+  return;
 }
-
 
 int main() {
   int a, b;
