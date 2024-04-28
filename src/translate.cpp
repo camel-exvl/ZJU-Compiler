@@ -20,8 +20,24 @@ static void printToFile(FILE* file, int indent, const char* format, ...) {
     va_end(args);
 }
 
+static void handlePointer(SymbolTable* table, std::string& name, int indent) {
+    if (name[0] == '*') {
+        std::string temp = table->newTemp();
+        printToFile(outputFile, indent, "%s = %s\n", temp.c_str(), name.c_str());
+        name = temp;
+    }
+}
+
 std::string SymbolTable::insert(std::string name) {
     std::string newName = name;
+    // avoid conflict
+    if (newName[0] == '_') {
+        newName = '_' + newName;
+    }
+    if (newName.back() == '_' || (newName.back() >= '0' && newName.back() <= '9')) {
+        newName += '_';
+    }
+
     if (!table_.count(name)) {
         table_[name] = std::list<std::string>();
         table_[name].emplace_back("$");
@@ -29,9 +45,6 @@ std::string SymbolTable::insert(std::string name) {
         throw std::runtime_error("redefinition of symbol " + name);
     } else {
         newName += std::to_string(table_[name].size() / 2);
-        if (newName[0] == '_') {  // avoid conflict with user-defined variable
-            newName = '_' + newName;
-        }
     }
     table_[name].emplace_back(newName);
     if (isGlobalLayer()) {
@@ -86,20 +99,29 @@ void SymbolTable::exitScope() {
     }
     --layer_;
 }
+
 void Exp::translateCond(SymbolTable* table, std::string trueLabel, std::string falseLabel, int indent) {
     std::string place = table->newTemp();
-    translateExp(table, place, indent);
+    translateExp(table, place, indent, false);
     std::string zero = table->newTemp();
     printToFile(outputFile, indent, "%s = #0\n", zero.c_str());
     printToFile(outputFile, indent, "IF %s != %s GOTO %s\n", place.c_str(), zero.c_str(), trueLabel.c_str());
     printToFile(outputFile, indent, "GOTO %s\n", falseLabel.c_str());
 }
 
-void Ident::translateExp(SymbolTable* table, std::string& place, int indent) {
+void Ident::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
+    if (place.empty()) {
+        place = table->newTemp();
+    }
+
     printToFile(outputFile, indent, "%s = %s\n", place.c_str(), table->lookup(name_).c_str());
 }
 
-void IntConst::translateExp(SymbolTable* table, std::string& place, int indent) {
+void IntConst::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
+    if (place.empty()) {
+        place = table->newTemp();
+    }
+
     printToFile(outputFile, indent, "%s = #%d\n", place.c_str(), val_);
 }
 
@@ -109,8 +131,17 @@ void CompUnit::translateStmt(SymbolTable* table, int indent) {
     table->insert("read");
     table->insert("write");
 
+    // translate global variable
     for (auto stmt : stmts_) {
-        stmt->translateStmt(table, indent);
+        if (typeid(*stmt) == typeid(VarDecl)) {
+            stmt->translateStmt(table, indent);
+        }
+    }
+
+    for (auto stmt : stmts_) {
+        if (typeid(*stmt) != typeid(VarDecl)) {
+            stmt->translateStmt(table, indent);
+        }
     }
 
     table->exitScope();
@@ -169,7 +200,7 @@ static void translateArrayInitlist(std::vector<int>& size, int l, int r, InitVal
             if (initPlace.empty()) {
                 printToFile(outputFile, indent, ".WORD #%d\n", static_cast<IntConst*>(val->getVal())->getValue());
             } else {
-                val->getVal()->translateExp(table, numPlace, indent);
+                val->getVal()->translateExp(table, numPlace, indent, false);
                 printToFile(outputFile, indent, "*%s = %s\n", initPlace.c_str(), numPlace.c_str());
                 printToFile(outputFile, indent, "%s = %s + #4\n", initPlace.c_str(), initPlace.c_str());
             }
@@ -229,7 +260,7 @@ void VarDef::translateStmt(SymbolTable* table, int indent) {
             printToFile(outputFile, indent, ".WORD #%d\n", static_cast<IntConst*>(init_->getVal())->getValue());
         } else {
             std::string place = name;
-            init_->getVal()->translateExp(table, place, indent);
+            init_->getVal()->translateExp(table, place, indent, false);
         }
     } else {
         if (table->isGlobalLayer()) {
@@ -278,11 +309,33 @@ void FuncDef::translateStmt(SymbolTable* table, int indent) {
             printToFile(outputFile, indent + 1, "PARAM %s\n", name.c_str());
         }
     }
-    body_->translateStmtWithoutScope(table, indent + 1);
+
+    if (body_) {
+        body_->translateStmtWithoutScope(table, indent + 1);
+    }
+
+    // if the last statement is not return, add a return statement
+    if (!body_ || typeid(*body_->getStmts().back()) != typeid(ReturnStmt)) {
+        switch (ftype_->getType().getVal().simple) {
+            case SimpleKind::VOID: {
+                printToFile(outputFile, indent + 1, "RETURN\n");
+                break;
+            }
+            case SimpleKind::INT: {
+                std::string zero = table->newTemp();
+                printToFile(outputFile, indent + 1, "%s = #0\n", zero.c_str());
+                printToFile(outputFile, indent + 1, "RETURN %s\n", zero.c_str());
+                break;
+            }
+            default: {
+                throw std::runtime_error("unknown return type");
+            }
+        }
+    }
     table->exitScope();
 }
 
-void LVal::translateExp(SymbolTable* table, std::string& place, int indent, bool replace) {
+void LVal::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
     std::string name = table->lookup(name_);
     if (arr_) {
         std::vector<IntConst*> size = table->lookupArray(name);
@@ -308,7 +361,7 @@ void LVal::translateExp(SymbolTable* table, std::string& place, int indent, bool
 
         for (int i = dims.size() - 1; i >= 0; --i) {
             std::string dimPlace = table->newTemp();
-            dims[i]->translateExp(table, dimPlace, indent);
+            dims[i]->translateExp(table, dimPlace, indent, false);
             printToFile(outputFile, indent, "%s = #%d\n", blockPlace.c_str(), block);
 
             printToFile(outputFile, indent, "%s = %s * %s\n", curOffset.c_str(), dimPlace.c_str(), blockPlace.c_str());
@@ -333,7 +386,7 @@ void LVal::translateExp(SymbolTable* table, std::string& place, int indent, bool
         }
     }
 
-    if (replace) {
+    if (place.empty()) {
         place = name;
     } else {
         printToFile(outputFile, indent, "%s = %s\n", place.c_str(), name.c_str());
@@ -341,11 +394,15 @@ void LVal::translateExp(SymbolTable* table, std::string& place, int indent, bool
 }
 
 void AssignStmt::translateStmt(SymbolTable* table, int indent) {
-    std::string lval = table->newTemp();
-    lhs_->translateExp(table, lval, indent, true);
-    std::string rval = table->newTemp();
-    rhs_->translateExp(table, rval, indent);
-    printToFile(outputFile, indent, "%s = %s\n", lval.c_str(), rval.c_str());
+    std::string lval = "";  // lval doesn't need to be a new temp
+    lhs_->translateExp(table, lval, indent, false);
+    if (lval[0] == '*') {
+        std::string rval = table->newTemp();
+        rhs_->translateExp(table, rval, indent, false);
+        printToFile(outputFile, indent, "%s = %s\n", lval.c_str(), rval.c_str());
+    } else {
+        rhs_->translateExp(table, lval, indent, false);
+    }
 }
 
 void IfStmt::translateStmt(SymbolTable* table, int indent) {
@@ -380,32 +437,40 @@ void WhileStmt::translateStmt(SymbolTable* table, int indent) {
 void ReturnStmt::translateStmt(SymbolTable* table, int indent) {
     if (ret_) {
         std::string retPlace = table->newTemp();
-        ret_->translateExp(table, retPlace, indent);
+        ret_->translateExp(table, retPlace, indent, false);
         printToFile(outputFile, indent, "RETURN %s\n", retPlace.c_str());
     } else {
         printToFile(outputFile, indent, "RETURN\n");
     }
 }
 
-void CallExp::translateExp(SymbolTable* table, std::string& place, int indent) {
+void CallExp::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
+    if (place.empty() && !ignoreReturn) {
+        place = table->newTemp();
+    }
+
     std::string function = table->lookup(name_);
     if (params_) {
         for (auto param : params_->getParams()) {
             std::string paramPlace = table->newTemp();
-            param->translateExp(table, paramPlace, indent);
+            param->translateExp(table, paramPlace, indent, false);
             printToFile(outputFile, indent, "ARG %s\n", paramPlace.c_str());
         }
     }
-    if (place.empty()) {
+    if (ignoreReturn) {
         printToFile(outputFile, indent, "CALL %s\n", function.c_str());
     } else {
         printToFile(outputFile, indent, "%s = CALL %s\n", place.c_str(), function.c_str());
     }
 }
 
-void UnaryExp::translateExp(SymbolTable* table, std::string& place, int indent) {
+void UnaryExp::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
+    if (place.empty()) {
+        place = table->newTemp();
+    }
+
     std::string expPlace = table->newTemp();
-    exp_->translateExp(table, expPlace, indent);
+    exp_->translateExp(table, expPlace, indent, false);
     printToFile(outputFile, indent, "%s = %s%s\n", place.c_str(), op_, expPlace.c_str());
 }
 
@@ -417,19 +482,25 @@ void UnaryExp::translateCond(SymbolTable* table, std::string trueLabel, std::str
     }
 }
 
-void BinaryExp::translateExp(SymbolTable* table, std::string& place, int indent) {
-    std::string left = table->newTemp();
-    std::string right = table->newTemp();
-    lhs_->translateExp(table, left, indent);
-    rhs_->translateExp(table, right, indent);
+void BinaryExp::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
+    if (place.empty()) {
+        place = table->newTemp();
+    }
+
+    std::string left = "";
+    std::string right = "";
+    lhs_->translateExp(table, left, indent, false);
+    rhs_->translateExp(table, right, indent, false);
+    handlePointer(table, left, indent);
+    handlePointer(table, right, indent);
     printToFile(outputFile, indent, "%s = %s %s %s\n", place.c_str(), left.c_str(), op_, right.c_str());
 }
 
 void RelExp::translateCond(SymbolTable* table, std::string trueLabel, std::string falseLabel, int indent) {
     std::string left = table->newTemp();
     std::string right = table->newTemp();
-    lhs_->translateExp(table, left, indent);
-    rhs_->translateExp(table, right, indent);
+    lhs_->translateExp(table, left, indent, false);
+    rhs_->translateExp(table, right, indent, false);
     printToFile(outputFile, indent, "IF %s %s %s GOTO %s\n", left.c_str(), op_, right.c_str(), trueLabel.c_str());
     printToFile(outputFile, indent, "GOTO %s\n", falseLabel.c_str());
 }

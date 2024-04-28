@@ -71,7 +71,8 @@ bool Type::operator==(const Type& other) const {
             return false;
         }
         for (size_t i = 0; i < val_.array->size.size(); ++i) {
-            if (val_.array->size[i] != other.val_.array->size[i] && (val_.array->size[i] != -1 && other.val_.array->size[i] != -1)) {
+            if (val_.array->size[i] != other.val_.array->size[i] &&
+                (val_.array->size[i] != -1 && other.val_.array->size[i] != -1)) {
                 return false;
             }
         }
@@ -217,15 +218,17 @@ Type ArrayDef::typeCheck(Table* table) {
 }
 
 /*
-1. 记录待处理的 n 维数组各维度的总长 len_1,len_2,⋯ ,len_n​. 比如 int[2][3][4] 各维度的长度分别为 2, 3 和 4.
+1. 记录待处理的 n 维数组各维度的总长 len_1,len_2,⋯ ,len_n​. 比如 int[2][3][4] 各维度的长度分别为 2, 3
+和 4.
 2. 依次处理初始化列表内的元素, 元素的形式无非就两种可能: 整数, 或者另一个初始化列表.
 3. 遇到整数时, 从当前待处理的维度中的最后一维 (第 n 维) 开始填充数据.
 4. 遇到初始化列表时:
-    当前已经填充完毕的元素的个数必须是 len_n​ 的整数倍, 否则这个初始化列表没有对齐数组维度的边界, 你可以认为这种情况属于语义错误.
-    检查当前对齐到了哪一个边界, 然后将当前初始化列表视作这个边界所对应的最长维度的数组的初始化列表, 并递归处理. 比如:
-        对于 int[2][3][4] 和初始化列表 {1, 2, 3, 4, {5}}, 内层的初始化列表 {5} 对应的数组是 int[4].
-        对于 int[2][3][4] 和初始化列表 {1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, {5}}, 内层的初始化列表 {5} 对应的数组是 int[3][4].
-        对于 int[2][3][4] 和初始化列表 {{5}}, 内层的初始化列表 {5} 之前没出现任何整数元素, 这种情况其对应的数组是 int[3][4].
+    当前已经填充完毕的元素的个数必须是 len_n​ 的整数倍, 否则这个初始化列表没有对齐数组维度的边界,
+你可以认为这种情况属于语义错误. 检查当前对齐到了哪一个边界,
+然后将当前初始化列表视作这个边界所对应的最长维度的数组的初始化列表, 并递归处理. 比如: 对于 int[2][3][4] 和初始化列表 {1,
+2, 3, 4, {5}}, 内层的初始化列表 {5} 对应的数组是 int[4]. 对于 int[2][3][4] 和初始化列表 {1, 2, 3, 4, 1, 2, 3, 4, 1, 2,
+3, 4, {5}}, 内层的初始化列表 {5} 对应的数组是 int[3][4]. 对于 int[2][3][4] 和初始化列表 {{5}}, 内层的初始化列表 {5}
+之前没出现任何整数元素, 这种情况其对应的数组是 int[3][4].
 */
 static void arrayInitlistTypeCheck(std::vector<int>& size, int l, int r, InitVal* init) {
     if (!init->getVal()) {
@@ -389,7 +392,9 @@ Type FuncDef::typeCheck(Table* table) {
     }
 
     table->setReturnType(&type.getVal().func->ret);
-    body_->typeCheckWithoutScope(table);
+    if (body_) {
+        body_->typeCheckWithoutScope(table);
+    }
     table->setReturnType(nullptr);
 
     table->exitScope();
