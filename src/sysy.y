@@ -14,7 +14,8 @@ extern bool errorFlag;
 extern int yylineno, yycolumn, yyleng;
 extern char *yytext;
 extern char* lineptr;
-extern char* filename;
+extern char* inputFilename;
+extern FILE* inputFile;
 
 #include "sysy.tab.hh"
 void error_handle(const char *s, YYLTYPE pos);
@@ -191,16 +192,14 @@ void error_handle(const char *s, YYLTYPE pos) {
 }
 
 void yyerror(const char *s) {
-    fprintf(stderr, "\033[1m%s:%d:%d:\033[0m \033[1;31merror: \033[0m%s\n", filename, yylineno, yycolumn - 1, s);
+    fprintf(stderr, "\033[1m%s:%d:%d:\033[0m \033[1;31merror: \033[0m%s\n", inputFilename, yylineno, yycolumn - 1, s);
     int spaceLen = fprintf(stderr, "  %d | ", yylineno);
 
     // read the line from file
-    FILE *file = fopen(filename, "r");
-    fseek(file, 0, SEEK_SET);
+    fseek(inputFile, 0, SEEK_SET);
     for (int i = 1; i <= yylineno; i++) {
-        fgets(lineptr, 1024, file);
+        fgets(lineptr, 1024, inputFile);
     }
-    fclose(file);
 
     // print the line
     fprintf(stderr, "%.*s", yycolumn - yyleng - 1, lineptr);

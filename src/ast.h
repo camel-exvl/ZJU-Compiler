@@ -7,6 +7,7 @@
 #include <list>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <stdexcept>
 
 /* Location type.  */
@@ -24,9 +25,10 @@ struct YYLTYPE {
 
 class Type;
 class Table;
+class IntConst;
 
 extern void error_handle(const char *s, YYLTYPE pos);
-extern Table *globalTable;
+extern FILE *outputFile;
 
 enum class SimpleKind { SCOPE, INT, VOID };
 enum class TypeKind { UNKNOWN, SIMPLE, ARRAY, FUNC };
@@ -75,6 +77,7 @@ typedef struct FUNCVAL {
     Type ret;
 } FuncVal;
 
+// for type check
 class Table {
    public:
     Table() {}
@@ -91,11 +94,41 @@ class Table {
     Type *return_type_;
 };
 
+// for translate
+class SymbolTable {
+   public:
+    SymbolTable() {}
+
+    std::string insert(std::string name);  // return the new name
+    std::string lookup(std::string name);
+    void insertArray(std::string name, std::vector<IntConst *> size) { array_table_[name] = size; }
+    std::vector<IntConst *> lookupArray(std::string name);
+    bool isArray(std::string name) { return array_table_.count(name); }
+    void enterScope();
+    void exitScope();
+    std::string newTemp() { return "_t" + std::to_string(temp_count_++); }
+    std::string newLabel() { return "_l" + std::to_string(label_count_++); }
+    bool isGlobalLayer() { return layer_ == 1; }
+    bool isGlobal(std::string name) { return global_table_.count(name); }
+
+   private:
+    std::unordered_map<std::string, std::list<std::string>> table_;
+    std::unordered_set<std::string> global_table_;
+    std::unordered_map<std::string, std::vector<IntConst *>> array_table_;
+    int temp_count_ = 0;
+    int label_count_ = 0;
+    int layer_ = 0;
+};
+
 class BaseStmt {
    public:
     BaseStmt(YYLTYPE pos) : pos(pos) {}
     virtual ~BaseStmt() {}
-    virtual Type typeCheck(Table *table) = 0;
+
+    virtual Type typeCheck(Table *table) { throw std::runtime_error("typeCheck is not implemented for this class"); }
+    virtual void translateStmt(SymbolTable *table, int indent) {
+        throw std::runtime_error("translateStmt is not implemented for this class");
+    }
     virtual void print(int indent = 0, bool last = false) = 0;
     static void printIndent(int indent = 0, bool last = false);
     YYLTYPE getPos() { return pos; }
@@ -107,6 +140,11 @@ class BaseStmt {
 class Exp : public BaseStmt {
    public:
     Exp(YYLTYPE pos) : BaseStmt(pos) {}
+
+    virtual void translateExp(SymbolTable *table, std::string &place, int indent) {
+        throw std::runtime_error("translateExp is not implemented for this class");
+    }
+    virtual void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, int indent);
 };
 
 class Ident : public Exp {
@@ -114,6 +152,7 @@ class Ident : public Exp {
     Ident(YYLTYPE pos, const char *name) : Exp(pos), name_(name) {}
 
     Type typeCheck(Table *table) override { return table->lookup(name_, pos); }
+    void translateExp(SymbolTable *table, std::string &place, int indent) override;
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
         printf("Ident: %s\n", name_);
@@ -128,6 +167,7 @@ class IntConst : public Exp {
     IntConst(YYLTYPE pos, int val) : Exp(pos), val_(val) {}
 
     Type typeCheck(Table *table) override { return Type(TypeKind::SIMPLE, {SimpleKind::INT}); }
+    void translateExp(SymbolTable *table, std::string &place, int indent) override;
     int getValue() { return val_; }
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
@@ -136,21 +176,6 @@ class IntConst : public Exp {
 
    private:
     int val_;
-};
-
-class ExprStmt : public BaseStmt {
-   public:
-    ExprStmt(YYLTYPE pos, Exp *expr) : BaseStmt(pos), expr_(expr) {}
-    ~ExprStmt() { delete expr_; }
-
-    Type typeCheck(Table *table) override { return expr_->typeCheck(table); }
-    void print(int indent = 0, bool last = false) override {
-        printIndent(indent, last);
-        expr_->print(indent + 1, true);
-    }
-
-   private:
-    Exp *expr_;
 };
 
 class CompUnit : public BaseStmt {
@@ -163,6 +188,7 @@ class CompUnit : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
+    void translateStmt(SymbolTable *table, int indent) override;
     void print(int indent = 0, bool last = false) override;
     void append(BaseStmt *stmt) { stmts_.push_back(stmt); }
 
@@ -181,9 +207,9 @@ class TypeDecl : public BaseStmt {
     Type type_;
 };
 
-class InitVal : public BaseStmt {
+class InitVal : public Exp {
    public:
-    InitVal(YYLTYPE pos, BaseStmt *val, bool is_list_) : BaseStmt(pos), val_(val), is_list_(is_list_) {}
+    InitVal(YYLTYPE pos, Exp *val, bool is_list_) : Exp(pos), val_(val), is_list_(is_list_) {}
     ~InitVal() { delete val_; }
 
     Type typeCheck(Table *table) override {
@@ -191,23 +217,22 @@ class InitVal : public BaseStmt {
     }
     void print(int indent = 0, bool last = false) override;
     bool isList() { return is_list_; }
-    BaseStmt *getVal() { return val_; }
+    Exp *getVal() { return val_; }
 
    private:
-    BaseStmt *val_;
+    Exp *val_;
     bool is_list_;
 };
 
-class InitValList : public BaseStmt {
+class InitValList : public Exp {
    public:
-    InitValList(YYLTYPE pos) : BaseStmt(pos) {}
+    InitValList(YYLTYPE pos) : Exp(pos) {}
     ~InitValList() {
         for (auto init_val : init_vals_) {
             delete init_val;
         }
     }
 
-    Type typeCheck(Table *table) override { throw std::runtime_error("InitValList typeCheck is never called"); }
     void print(int indent = 0, bool last = false) override {
         for (auto init_val : init_vals_) {
             init_val->print(indent, init_val == init_vals_.back());
@@ -237,6 +262,7 @@ class ArrayDef : public BaseStmt {
         }
     }
     void append(YYLTYPE pos, int dim) { dims_.push_back(new IntConst(pos, dim)); }
+    std::vector<IntConst *> getDims() { return dims_; }
 
    private:
     std::vector<IntConst *> dims_;
@@ -252,8 +278,10 @@ class VarDef : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
+    void translateStmt(SymbolTable *table, int indent) override;
     void print(int indent = 0, bool last = false) override;
     const char *getName() { return name_; }
+    ArrayDef *getArrayDef() { return array_def_; }
 
    private:
     const char *name_;
@@ -270,7 +298,6 @@ class VarDefList : public BaseStmt {
         }
     }
 
-    Type typeCheck(Table *table) override { throw std::runtime_error("VarDefList typeCheck is never called"); }
     void print(int indent = 0, bool last = false) override {
         for (auto def : defs_) {
             def->print(indent, def == defs_.back());
@@ -292,6 +319,7 @@ class VarDecl : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
+    void translateStmt(SymbolTable *table, int indent) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -311,6 +339,7 @@ class FuncFArrParam : public BaseStmt {
     Type typeCheck(Table *table) override;
     void print(int indent = 0, bool last = false) override;
     void append(YYLTYPE pos, int dim) { dims_.push_back(new IntConst(pos, dim)); }
+    std::vector<IntConst *> &getDims() { return dims_; }
 
    private:
     std::vector<IntConst *> dims_;
@@ -328,6 +357,7 @@ class FuncFParam : public BaseStmt {
     Type typeCheck(Table *table) override;
     void print(int indent = 0, bool last = false) override;
     const char *getName() { return name_; }
+    FuncFArrParam *getArrParam() { return arr_param_; }
 
    private:
     TypeDecl *ftype_;
@@ -344,7 +374,6 @@ class FuncFParams : public BaseStmt {
         }
     }
 
-    Type typeCheck(Table *table) override { throw std::runtime_error("FuncFParams typeCheck is never called"); }
     void print(int indent = 0, bool last = false) override {
         for (auto fparam : fparams_) {
             fparam->print(indent, last && fparam == fparams_.back());
@@ -368,6 +397,8 @@ class Block : public BaseStmt {
 
     Type typeCheck(Table *table) override;
     Type typeCheckWithoutScope(Table *table);
+    void translateStmt(SymbolTable *table, int indent) override;
+    void translateStmtWithoutScope(SymbolTable *table, int indent);
     void print(int indent = 0, bool last = false) override;
     void append(BaseStmt *stmt) { stmts_.push_back(stmt); }
 
@@ -386,6 +417,7 @@ class FuncDef : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
+    void translateStmt(SymbolTable *table, int indent) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -404,7 +436,6 @@ class LArrVal : public BaseStmt {
         }
     }
 
-    Type typeCheck(Table *table) override { throw std::runtime_error("LArrVal typeCheck is never called"); }
     void print(int indent = 0, bool last = false) override {
         for (auto exp : dims_) {
             exp->print(indent, exp == dims_.back());
@@ -424,6 +455,10 @@ class LVal : public Exp {
     ~LVal() { delete arr_; }
 
     Type typeCheck(Table *table) override;
+    void translateExp(SymbolTable *table, std::string &place, int indent) override {
+        translateExp(table, place, indent, false);
+    }
+    void translateExp(SymbolTable *table, std::string &place, int indent, bool replace);
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -440,6 +475,7 @@ class AssignStmt : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
+    void translateStmt(SymbolTable *table, int indent) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -452,6 +488,7 @@ class EmptyStmt : public BaseStmt {
     EmptyStmt(YYLTYPE pos) : BaseStmt(pos) {}
 
     Type typeCheck(Table *table) override { return Type(TypeKind::SIMPLE, {SimpleKind::VOID}); }
+    void translateStmt(SymbolTable *table, int indent) override {}
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
         printf("EmptyStmt\n");
@@ -466,6 +503,10 @@ class ExpStmt : public BaseStmt {
     Type typeCheck(Table *table) override {
         expr_->typeCheck(table);
         return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
+    }
+    void translateStmt(SymbolTable *table, int indent) override {
+        std::string place = table->newTemp();
+        expr_->translateExp(table, place, indent);
     }
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
@@ -489,6 +530,7 @@ class IfStmt : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
+    void translateStmt(SymbolTable *table, int indent) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -506,6 +548,7 @@ class WhileStmt : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
+    void translateStmt(SymbolTable *table, int indent) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -520,6 +563,7 @@ class ReturnStmt : public BaseStmt {
     ~ReturnStmt() { delete ret_; }
 
     Type typeCheck(Table *table) override;
+    void translateStmt(SymbolTable *table, int indent) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -532,6 +576,9 @@ class PrimaryExp : public Exp {
     ~PrimaryExp() { delete exp_; }
 
     Type typeCheck(Table *table) override { return exp_->typeCheck(table); }
+    void translateExp(SymbolTable *table, std::string &place, int indent) override {
+        exp_->translateExp(table, place, indent);
+    }
     void print(int indent = 0, bool last = false) override { exp_->print(indent, last); }
 
    private:
@@ -547,7 +594,6 @@ class FuncRParams : public BaseStmt {
         }
     }
 
-    Type typeCheck(Table *table) override { throw std::runtime_error("FuncRParams typeCheck is never called"); }
     void print(int indent = 0, bool last = false) override {
         for (auto param : params_) {
             param->print(indent, param == params_.back());
@@ -568,6 +614,7 @@ class CallExp : public Exp {
     ~CallExp() { delete params_; }
 
     Type typeCheck(Table *table) override;
+    void translateExp(SymbolTable *table, std::string &place, int indent) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -581,6 +628,8 @@ class UnaryExp : public Exp {
     ~UnaryExp() { delete exp_; }
 
     Type typeCheck(Table *table) override;
+    void translateExp(SymbolTable *table, std::string &place, int indent) override;
+    void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, int indent) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -597,6 +646,7 @@ class BinaryExp : public Exp {
     }
 
     Type typeCheck(Table *table) override;
+    void translateExp(SymbolTable *table, std::string &place, int indent) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -613,6 +663,7 @@ class RelExp : public Exp {
     }
 
     Type typeCheck(Table *table) override;
+    void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, int indent) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -629,6 +680,7 @@ class LogicExp : public Exp {
     }
 
     Type typeCheck(Table *table) override;
+    void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, int indent) override;
     void print(int indent = 0, bool last = false) override;
 
    private:

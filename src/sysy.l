@@ -9,7 +9,6 @@
 #include <string>
 #include "sysy.tab.hh"
 extern bool errorFlag;
-extern char* filename;
 extern void yyerror(const char *s);
 
 int yycolumn = 1;
