@@ -144,7 +144,7 @@ def run_one_test(compiler: str, test: Test, lab: str) -> TestResult:
                 timeout=TIMEOUT)
             if result.returncode != 0:  # compile error
                 return TestResult(test, None, result.returncode)
-            with subprocess.Popen([JAVA_PATH, "-jar", VENUS_JAR, assembly_file.name],
+            with subprocess.Popen([JAVA_PATH, "-jar", VENUS_JAR, assembly_file.name, "-ahs"],
                                   stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE,
                                   text=True) as p:
