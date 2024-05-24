@@ -1,6 +1,7 @@
 #ifndef _AST_H_
 #define _AST_H_
 
+#include "ir.h"
 #include <cstdio>
 #include <vector>
 #include <stack>
@@ -126,7 +127,7 @@ class BaseStmt {
     virtual ~BaseStmt() {}
 
     virtual Type typeCheck(Table *table) { throw std::runtime_error("typeCheck is not implemented for this class"); }
-    virtual void translateStmt(SymbolTable *table, int indent) {
+    virtual void translateStmt(SymbolTable *table, IRNode *&tail) {
         throw std::runtime_error("translateStmt is not implemented for this class");
     }
     virtual void print(int indent = 0, bool last = false) = 0;
@@ -142,10 +143,10 @@ class Exp : public BaseStmt {
     Exp(YYLTYPE pos) : BaseStmt(pos) {}
 
     // if place is empty, the function will try to replace the value in place to decrease the number of temp variables
-    virtual void translateExp(SymbolTable *table, std::string &place, int indent, bool ignoreReturn) {
+    virtual void translateExp(SymbolTable *table, std::string &place, bool ignoreReturn, IRNode *&tail) {
         throw std::runtime_error("translateExp is not implemented for this class");
     }
-    virtual void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, int indent);
+    virtual void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, IRNode *&tail);
 };
 
 class Ident : public Exp {
@@ -153,7 +154,7 @@ class Ident : public Exp {
     Ident(YYLTYPE pos, const char *name) : Exp(pos), name_(name) {}
 
     Type typeCheck(Table *table) override { return table->lookup(name_, pos); }
-    void translateExp(SymbolTable *table, std::string &place, int indent, bool ignoreReturn) override;
+    void translateExp(SymbolTable *table, std::string &place, bool ignoreReturn, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
         printf("Ident: %s\n", name_);
@@ -168,7 +169,7 @@ class IntConst : public Exp {
     IntConst(YYLTYPE pos, int val) : Exp(pos), val_(val) {}
 
     Type typeCheck(Table *table) override { return Type(TypeKind::SIMPLE, {SimpleKind::INT}); }
-    void translateExp(SymbolTable *table, std::string &place, int indent, bool ignoreReturn) override;
+    void translateExp(SymbolTable *table, std::string &place, bool ignoreReturn, IRNode *&tail) override;
     int getValue() { return val_; }
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
@@ -189,7 +190,7 @@ class CompUnit : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
-    void translateStmt(SymbolTable *table, int indent) override;
+    void translateStmt(SymbolTable *table, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
     void append(BaseStmt *stmt) { stmts_.push_back(stmt); }
 
@@ -280,7 +281,7 @@ class VarDef : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
-    void translateStmt(SymbolTable *table, int indent) override;
+    void translateStmt(SymbolTable *table, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
     const char *getName() { return name_; }
     ArrayDef *getArrayDef() { return array_def_; }
@@ -321,7 +322,7 @@ class VarDecl : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
-    void translateStmt(SymbolTable *table, int indent) override;
+    void translateStmt(SymbolTable *table, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -399,8 +400,8 @@ class Block : public BaseStmt {
 
     Type typeCheck(Table *table) override;
     Type typeCheckWithoutScope(Table *table);
-    void translateStmt(SymbolTable *table, int indent) override;
-    void translateStmtWithoutScope(SymbolTable *table, int indent);
+    void translateStmt(SymbolTable *table, IRNode *&tail) override;
+    void translateStmtWithoutScope(SymbolTable *table, IRNode *&tail);
 
     void print(int indent = 0, bool last = false) override;
     void append(BaseStmt *stmt) { stmts_.push_back(stmt); }
@@ -421,7 +422,7 @@ class FuncDef : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
-    void translateStmt(SymbolTable *table, int indent) override;
+    void translateStmt(SymbolTable *table, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -459,7 +460,7 @@ class LVal : public Exp {
     ~LVal() { delete arr_; }
 
     Type typeCheck(Table *table) override;
-    void translateExp(SymbolTable *table, std::string &place, int indent, bool ignoreReturn) override;
+    void translateExp(SymbolTable *table, std::string &place, bool ignoreReturn, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -476,7 +477,7 @@ class AssignStmt : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
-    void translateStmt(SymbolTable *table, int indent) override;
+    void translateStmt(SymbolTable *table, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -489,7 +490,7 @@ class EmptyStmt : public BaseStmt {
     EmptyStmt(YYLTYPE pos) : BaseStmt(pos) {}
 
     Type typeCheck(Table *table) override { return Type(TypeKind::SIMPLE, {SimpleKind::VOID}); }
-    void translateStmt(SymbolTable *table, int indent) override {}
+    void translateStmt(SymbolTable *table, IRNode *&tail) override {}
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
         printf("EmptyStmt\n");
@@ -505,9 +506,9 @@ class ExpStmt : public BaseStmt {
         expr_->typeCheck(table);
         return Type(TypeKind::SIMPLE, {SimpleKind::VOID});
     }
-    void translateStmt(SymbolTable *table, int indent) override {
+    void translateStmt(SymbolTable *table, IRNode *&tail) override {
         std::string place = "";
-        expr_->translateExp(table, place, indent, true);
+        expr_->translateExp(table, place, true, tail);
     }
     void print(int indent = 0, bool last = false) override {
         printIndent(indent, last);
@@ -531,7 +532,7 @@ class IfStmt : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
-    void translateStmt(SymbolTable *table, int indent) override;
+    void translateStmt(SymbolTable *table, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -549,7 +550,7 @@ class WhileStmt : public BaseStmt {
     }
 
     Type typeCheck(Table *table) override;
-    void translateStmt(SymbolTable *table, int indent) override;
+    void translateStmt(SymbolTable *table, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -564,7 +565,7 @@ class ReturnStmt : public BaseStmt {
     ~ReturnStmt() { delete ret_; }
 
     Type typeCheck(Table *table) override;
-    void translateStmt(SymbolTable *table, int indent) override;
+    void translateStmt(SymbolTable *table, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -577,8 +578,8 @@ class PrimaryExp : public Exp {
     ~PrimaryExp() { delete exp_; }
 
     Type typeCheck(Table *table) override { return exp_->typeCheck(table); }
-    void translateExp(SymbolTable *table, std::string &place, int indent, bool ignoreReturn) override {
-        exp_->translateExp(table, place, indent, ignoreReturn);
+    void translateExp(SymbolTable *table, std::string &place, bool ignoreReturn, IRNode *&tail) override {
+        exp_->translateExp(table, place, ignoreReturn,tail);
     }
     void print(int indent = 0, bool last = false) override { exp_->print(indent, last); }
 
@@ -615,7 +616,7 @@ class CallExp : public Exp {
     ~CallExp() { delete params_; }
 
     Type typeCheck(Table *table) override;
-    void translateExp(SymbolTable *table, std::string &place, int indent, bool ignoreReturn) override;
+    void translateExp(SymbolTable *table, std::string &place, bool ignoreReturn, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -629,8 +630,8 @@ class UnaryExp : public Exp {
     ~UnaryExp() { delete exp_; }
 
     Type typeCheck(Table *table) override;
-    void translateExp(SymbolTable *table, std::string &place, int indent, bool ignoreReturn) override;
-    void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, int indent) override;
+    void translateExp(SymbolTable *table, std::string &place, bool ignoreReturn, IRNode *&tail) override;
+    void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -647,12 +648,12 @@ class BinaryExp : public Exp {
     }
 
     Type typeCheck(Table *table) override;
-    void translateExp(SymbolTable *table, std::string &place, int indent, bool ignoreReturn) override;
+    void translateExp(SymbolTable *table, std::string &place, bool ignoreReturn, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
     Exp *lhs_, *rhs_;
-    const char *op_;
+    std::string op_;
 };
 
 class RelExp : public Exp {
@@ -664,7 +665,7 @@ class RelExp : public Exp {
     }
 
     Type typeCheck(Table *table) override;
-    void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, int indent) override;
+    void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:
@@ -681,7 +682,7 @@ class LogicExp : public Exp {
     }
 
     Type typeCheck(Table *table) override;
-    void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, int indent) override;
+    void translateCond(SymbolTable *table, std::string trueLabel, std::string falseLabel, IRNode *&tail) override;
     void print(int indent = 0, bool last = false) override;
 
    private:

@@ -172,7 +172,7 @@ void UnaryExp::print(int indent, bool last) {
 
 void BinaryExp::print(int indent, bool last) {
     printIndent(indent, last);
-    printf("BinaryExp: %s\n", op_);
+    printf("BinaryExp: %s\n", op_.c_str());
     lhs_->print(indent + 1, false);
     rhs_->print(indent + 1, true);
 }

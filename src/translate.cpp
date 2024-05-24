@@ -2,28 +2,19 @@
 #include <string.h>
 #include <cstdarg>
 
-static void printToFile(FILE* file, int indent, const char* format, ...) {
-    // if format begin with "LABEL"
-    if (strncmp(format, "LABEL", 5) == 0) {
-        for (int i = 0; i < indent; ++i) {
-            fprintf(file, "  ");
-        }
+static void linkToTail(IRNode*& tail, IRNode* target) {
+    if (tail) {
+        tail->next = target;
     } else {
-        for (int i = 0; i < indent; ++i) {
-            fprintf(file, "    ");
-        }
+        throw std::runtime_error("tail is nullptr");
     }
-
-    va_list args;
-    va_start(args, format);
-    vfprintf(file, format, args);
-    va_end(args);
+    tail = target;
 }
 
-static void handlePointer(SymbolTable* table, std::string& name, int indent) {
+static void handlePointer(SymbolTable* table, std::string& name, IRNode*& tail) {
     if (name[0] == '*') {
         std::string temp = table->newTemp();
-        printToFile(outputFile, indent, "%s = %s\n", temp.c_str(), name.c_str());
+        linkToTail(tail, new Load(Identifier(temp), Identifier(name.substr(1))));
         name = temp;
     }
 }
@@ -100,32 +91,32 @@ void SymbolTable::exitScope() {
     --layer_;
 }
 
-void Exp::translateCond(SymbolTable* table, std::string trueLabel, std::string falseLabel, int indent) {
+void Exp::translateCond(SymbolTable* table, std::string trueLabel, std::string falseLabel, IRNode*& tail) {
     std::string place = table->newTemp();
-    translateExp(table, place, indent, false);
+    translateExp(table, place, false, tail);
     std::string zero = table->newTemp();
-    printToFile(outputFile, indent, "%s = #0\n", zero.c_str());
-    printToFile(outputFile, indent, "IF %s != %s GOTO %s\n", place.c_str(), zero.c_str(), trueLabel.c_str());
-    printToFile(outputFile, indent, "GOTO %s\n", falseLabel.c_str());
+    linkToTail(tail, new LoadImm(Identifier(zero), Immediate(0)));
+    linkToTail(tail, new CondGoto(Identifier(place), Identifier(zero), "!=", trueLabel));
+    linkToTail(tail, new Goto(falseLabel));
 }
 
-void Ident::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
+void Ident::translateExp(SymbolTable* table, std::string& place, bool ignoreReturn, IRNode*& tail) {
     if (place.empty()) {
         place = table->newTemp();
     }
 
-    printToFile(outputFile, indent, "%s = %s\n", place.c_str(), table->lookup(name_).c_str());
+    linkToTail(tail, new Assign(Identifier(place), Identifier(table->lookup(name_))));
 }
 
-void IntConst::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
+void IntConst::translateExp(SymbolTable* table, std::string& place, bool ignoreReturn, IRNode*& tail) {
     if (place.empty()) {
         place = table->newTemp();
     }
 
-    printToFile(outputFile, indent, "%s = #%d\n", place.c_str(), val_);
+    linkToTail(tail, new LoadImm(Identifier(place), Immediate(val_)));
 }
 
-void CompUnit::translateStmt(SymbolTable* table, int indent) {
+void CompUnit::translateStmt(SymbolTable* table, IRNode*& tail) {
     table->enterScope();
     // insert read and write function
     table->insert("read");
@@ -134,13 +125,13 @@ void CompUnit::translateStmt(SymbolTable* table, int indent) {
     // translate global variable
     for (auto stmt : stmts_) {
         if (typeid(*stmt) == typeid(VarDecl)) {
-            stmt->translateStmt(table, indent);
+            stmt->translateStmt(table, tail);
         }
     }
 
     for (auto stmt : stmts_) {
         if (typeid(*stmt) != typeid(VarDecl)) {
-            stmt->translateStmt(table, indent);
+            stmt->translateStmt(table, tail);
         }
     }
 
@@ -161,21 +152,21 @@ void CompUnit::translateStmt(SymbolTable* table, int indent) {
 之前没出现任何整数元素, 这种情况其对应的数组是 int[3][4].
 */
 static void translateArrayInitlist(std::vector<int>& size, int l, int r, InitVal* init, std::string initPlace,
-                                   std::string numPlace, SymbolTable* table, int indent) {
+                                   std::string numPlace, SymbolTable* table, IRNode*& tail) {
     int totalSize = 1;
     for (int i = l; i <= r; ++i) {
         totalSize *= size[i];
     }
     if (!init->getVal()) {
         if (!initPlace.empty()) {
-            printToFile(outputFile, indent, "%s = #0\n", numPlace.c_str());
+            linkToTail(tail, new LoadImm(Identifier(numPlace), Immediate(0)));
         }
         for (int i = 0; i < totalSize; ++i) {
             if (initPlace.empty()) {
-                printToFile(outputFile, indent, ".WORD #0\n");
+                linkToTail(tail, new Word(Immediate(0)));
             } else {
-                printToFile(outputFile, indent, "*%s = %s\n", initPlace.c_str(), numPlace.c_str());
-                printToFile(outputFile, indent, "%s = %s + #4\n", initPlace.c_str(), initPlace.c_str());
+                linkToTail(tail, new Store(Identifier(initPlace), Identifier(numPlace)));
+                linkToTail(tail, new BinopImm(Identifier(initPlace), Identifier(initPlace), Immediate(4), "+"));
             }
         }
         return;
@@ -189,7 +180,7 @@ static void translateArrayInitlist(std::vector<int>& size, int l, int r, InitVal
                 --edge;
             }
 
-            translateArrayInitlist(size, edge + 1, r, val, initPlace, numPlace, table, indent);
+            translateArrayInitlist(size, edge + 1, r, val, initPlace, numPlace, table, tail);
 
             int mul = 1;
             for (int i = edge + 1; i <= r; ++i) {
@@ -198,11 +189,11 @@ static void translateArrayInitlist(std::vector<int>& size, int l, int r, InitVal
             finishedNum += mul;
         } else {
             if (initPlace.empty()) {
-                printToFile(outputFile, indent, ".WORD #%d\n", static_cast<IntConst*>(val->getVal())->getValue());
+                linkToTail(tail, new Word(Immediate(static_cast<IntConst*>(val->getVal())->getValue())));
             } else {
-                val->getVal()->translateExp(table, numPlace, indent, false);
-                printToFile(outputFile, indent, "*%s = %s\n", initPlace.c_str(), numPlace.c_str());
-                printToFile(outputFile, indent, "%s = %s + #4\n", initPlace.c_str(), initPlace.c_str());
+                val->getVal()->translateExp(table, numPlace, false, tail);
+                linkToTail(tail, new Store(Identifier(initPlace), Identifier(numPlace)));
+                linkToTail(tail, new BinopImm(Identifier(initPlace), Identifier(initPlace), Immediate(4), "+"));
             }
             ++finishedNum;
         }
@@ -210,22 +201,22 @@ static void translateArrayInitlist(std::vector<int>& size, int l, int r, InitVal
 
     // fill the rest with 0
     if (!initPlace.empty() && finishedNum < totalSize) {
-        printToFile(outputFile, indent, "%s = #%d\n", numPlace.c_str(), 0);
+        linkToTail(tail, new LoadImm(Identifier(numPlace), Immediate(0)));
     }
     for (int i = finishedNum; i < totalSize; ++i) {
         if (initPlace.empty()) {
-            printToFile(outputFile, indent, ".WORD #0\n");
+            linkToTail(tail, new Word(Immediate(0)));
         } else {
-            printToFile(outputFile, indent, "*%s = %s\n", initPlace.c_str(), numPlace.c_str());
-            printToFile(outputFile, indent, "%s = %s + #4\n", initPlace.c_str(), initPlace.c_str());
+            linkToTail(tail, new Store(Identifier(initPlace), Identifier(numPlace)));
+            linkToTail(tail, new BinopImm(Identifier(initPlace), Identifier(initPlace), Immediate(4), "+"));
         }
     }
 }
 
-void VarDef::translateStmt(SymbolTable* table, int indent) {
+void VarDef::translateStmt(SymbolTable* table, IRNode*& tail) {
     std::string name = table->lookup(name_);
     if (table->isGlobalLayer()) {
-        printToFile(outputFile, indent, "GLOBAL %s:\n", name.c_str());
+        linkToTail(tail, new GlobalVar(Identifier(name)));
     }
 
     if (array_def_) {
@@ -237,94 +228,93 @@ void VarDef::translateStmt(SymbolTable* table, int indent) {
         }
 
         if (!table->isGlobalLayer()) {
-            printToFile(outputFile, indent, "DEC %s #%d\n", name.c_str(), totalSize * 4);
+            linkToTail(tail, new VarDec(Identifier(name), Immediate(totalSize * 4)));
         }
         if (init_) {
             std::string initPlace = "", zeroPlace = "";
             if (!table->isGlobalLayer()) {
                 initPlace = table->newTemp();
                 zeroPlace = table->newTemp();
-                printToFile(outputFile, indent, "%s = %s\n", initPlace.c_str(), name.c_str());
+                linkToTail(tail, new Assign(Identifier(initPlace), Identifier(name)));
             }
-            translateArrayInitlist(size, 0, array_def_->getDims().size() - 1, init_, initPlace, zeroPlace, table,
-                                   indent);
+            translateArrayInitlist(size, 0, array_def_->getDims().size() - 1, init_, initPlace, zeroPlace, table, tail);
         } else {
             if (table->isGlobalLayer()) {
                 for (int i = 0; i < totalSize; ++i) {
-                    printToFile(outputFile, indent, ".WORD #0\n");
+                    linkToTail(tail, new Word(Immediate(0)));
                 }
             }
         }
     } else if (init_) {
         if (table->isGlobalLayer()) {
-            printToFile(outputFile, indent, ".WORD #%d\n", static_cast<IntConst*>(init_->getVal())->getValue());
+            linkToTail(tail, new Word(static_cast<IntConst*>(init_->getVal())->getValue()));
         } else {
             std::string place = name;
-            init_->getVal()->translateExp(table, place, indent, false);
+            init_->getVal()->translateExp(table, place, false, tail);
         }
     } else {
         if (table->isGlobalLayer()) {
-            printToFile(outputFile, indent, ".WORD #0\n");
+            linkToTail(tail, new Word(Immediate(0)));
         } else {
-            printToFile(outputFile, indent, "%s = #0\n", name.c_str());
+            linkToTail(tail, new LoadImm(Identifier(name), Immediate(0)));
         }
     }
 }
 
-void VarDecl::translateStmt(SymbolTable* table, int indent) {
+void VarDecl::translateStmt(SymbolTable* table, IRNode*& tail) {
     for (auto def : def_list_->getDefs()) {
         std::string name = table->insert(def->getName());
         if (def->getArrayDef()) {  // if it is an array
             table->insertArray(name, def->getArrayDef()->getDims());
         }
 
-        def->translateStmt(table, indent);
+        def->translateStmt(table, tail);
     }
 }
 
-void Block::translateStmt(SymbolTable* table, int indent) {
+void Block::translateStmt(SymbolTable* table, IRNode*& tail) {
     table->enterScope();
     for (auto stmt : stmts_) {
-        stmt->translateStmt(table, indent);
+        stmt->translateStmt(table, tail);
     }
     table->exitScope();
 }
 
-void Block::translateStmtWithoutScope(SymbolTable* table, int indent) {
+void Block::translateStmtWithoutScope(SymbolTable* table, IRNode*& tail) {
     for (auto stmt : stmts_) {
-        stmt->translateStmt(table, indent);
+        stmt->translateStmt(table, tail);
     }
 }
 
-void FuncDef::translateStmt(SymbolTable* table, int indent) {
+void FuncDef::translateStmt(SymbolTable* table, IRNode*& tail) {
     std::string functionName = table->insert(name_);
     table->enterScope();
-    printToFile(outputFile, indent, "FUNCTION %s:\n", functionName.c_str());
+    linkToTail(tail, new FuncDefNode(Identifier(functionName)));
     if (fparams_) {
         for (auto fparam : fparams_->getFParams()) {
             std::string name = table->insert(fparam->getName());
             if (fparam->getArrParam()) {  // if it is an array
                 table->insertArray(name, fparam->getArrParam()->getDims());
             }
-            printToFile(outputFile, indent + 1, "PARAM %s\n", name.c_str());
+            linkToTail(tail, new Param(Identifier(name)));
         }
     }
 
     if (body_) {
-        body_->translateStmtWithoutScope(table, indent + 1);
+        body_->translateStmtWithoutScope(table, tail);
     }
 
     // if the last statement is not return, add a return statement
     if (!body_ || typeid(*body_->getStmts().back()) != typeid(ReturnStmt)) {
         switch (ftype_->getType().getVal().simple) {
             case SimpleKind::VOID: {
-                printToFile(outputFile, indent + 1, "RETURN\n");
+                linkToTail(tail, new Return());
                 break;
             }
             case SimpleKind::INT: {
                 std::string zero = table->newTemp();
-                printToFile(outputFile, indent + 1, "%s = #0\n", zero.c_str());
-                printToFile(outputFile, indent + 1, "RETURN %s\n", zero.c_str());
+                linkToTail(tail, new LoadImm(Identifier(zero), Immediate(0)));
+                linkToTail(tail, new ReturnWithVal(Identifier(zero)));
                 break;
             }
             default: {
@@ -335,7 +325,7 @@ void FuncDef::translateStmt(SymbolTable* table, int indent) {
     table->exitScope();
 }
 
-void LVal::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
+void LVal::translateExp(SymbolTable* table, std::string& place, bool ignoreReturn, IRNode*& tail) {
     std::string name = table->lookup(name_);
     if (arr_) {
         std::vector<IntConst*> size = table->lookupArray(name);
@@ -346,9 +336,9 @@ void LVal::translateExp(SymbolTable* table, std::string& place, int indent, bool
         std::string curOffset = table->newTemp();
 
         if (table->isGlobal(name)) {
-            printToFile(outputFile, indent, "%s = &%s\n", offset.c_str(), name.c_str());
+            linkToTail(tail, new LoadGlobal(Identifier(offset), Identifier(name)));
         } else {
-            printToFile(outputFile, indent, "%s = %s\n", offset.c_str(), name.c_str());
+            linkToTail(tail, new Assign(Identifier(offset), Identifier(name)));
         }
 
         // align
@@ -361,11 +351,11 @@ void LVal::translateExp(SymbolTable* table, std::string& place, int indent, bool
 
         for (int i = dims.size() - 1; i >= 0; --i) {
             std::string dimPlace = table->newTemp();
-            dims[i]->translateExp(table, dimPlace, indent, false);
-            printToFile(outputFile, indent, "%s = #%d\n", blockPlace.c_str(), block);
+            dims[i]->translateExp(table, dimPlace, false, tail);
+            linkToTail(tail, new LoadImm(Identifier(blockPlace), Immediate(block)));
 
-            printToFile(outputFile, indent, "%s = %s * %s\n", curOffset.c_str(), dimPlace.c_str(), blockPlace.c_str());
-            printToFile(outputFile, indent, "%s = %s + %s\n", offset.c_str(), offset.c_str(), curOffset.c_str());
+            linkToTail(tail, new Binop(Identifier(curOffset), Identifier(dimPlace), Identifier(blockPlace), "*"));
+            linkToTail(tail, new Binop(Identifier(offset), Identifier(offset), Identifier(curOffset), "+"));
 
             if (size[i]) {  // if !size[i] then it is a parameter
                 block *= size[i]->getValue();
@@ -378,7 +368,7 @@ void LVal::translateExp(SymbolTable* table, std::string& place, int indent, bool
         }
     } else if (table->isGlobal(name)) {
         std::string globalPlace = table->newTemp();
-        printToFile(outputFile, indent, "%s = &%s\n", globalPlace.c_str(), name.c_str());
+        linkToTail(tail, new LoadGlobal(Identifier(globalPlace), Identifier(name)));
         if (table->isArray(name)) {
             name = globalPlace;
         } else {
@@ -389,62 +379,62 @@ void LVal::translateExp(SymbolTable* table, std::string& place, int indent, bool
     if (place.empty()) {
         place = name;
     } else {
-        printToFile(outputFile, indent, "%s = %s\n", place.c_str(), name.c_str());
+        linkToTail(tail, new Assign(Identifier(place), Identifier(name)));
     }
 }
 
-void AssignStmt::translateStmt(SymbolTable* table, int indent) {
+void AssignStmt::translateStmt(SymbolTable* table, IRNode*& tail) {
     std::string lval = "";  // lval doesn't need to be a new temp
-    lhs_->translateExp(table, lval, indent, false);
+    lhs_->translateExp(table, lval, false, tail);
     if (lval[0] == '*') {
         std::string rval = table->newTemp();
-        rhs_->translateExp(table, rval, indent, false);
-        printToFile(outputFile, indent, "%s = %s\n", lval.c_str(), rval.c_str());
+        rhs_->translateExp(table, rval, false, tail);
+        linkToTail(tail, new Store(Identifier(lval.substr(1)), Identifier(rval)));
     } else {
-        rhs_->translateExp(table, lval, indent, false);
+        rhs_->translateExp(table, lval, false, tail);
     }
 }
 
-void IfStmt::translateStmt(SymbolTable* table, int indent) {
+void IfStmt::translateStmt(SymbolTable* table, IRNode*& tail) {
     std::string thenLabel = table->newLabel();
     std::string elseLabel = table->newLabel();  // elseLabel is equal to endLabel if no else
-    cond_->translateCond(table, thenLabel, elseLabel, indent);
-    printToFile(outputFile, indent, "LABEL %s:\n", thenLabel.c_str());
-    then_->translateStmt(table, indent);
+    cond_->translateCond(table, thenLabel, elseLabel, tail);
+    linkToTail(tail, new Label(thenLabel));
+    then_->translateStmt(table, tail);
     if (els_) {
         std::string endLabel = table->newLabel();
-        printToFile(outputFile, indent, "GOTO %s\n", endLabel.c_str());
-        printToFile(outputFile, indent, "LABEL %s:\n", elseLabel.c_str());
-        els_->translateStmt(table, indent);
-        printToFile(outputFile, indent, "LABEL %s:\n", endLabel.c_str());
+        linkToTail(tail, new Goto(endLabel));
+        linkToTail(tail, new Label(elseLabel));
+        els_->translateStmt(table, tail);
+        linkToTail(tail, new Label(endLabel));
     } else {
-        printToFile(outputFile, indent, "LABEL %s:\n", elseLabel.c_str());
+        linkToTail(tail, new Label(elseLabel));
     }
 }
 
-void WhileStmt::translateStmt(SymbolTable* table, int indent) {
+void WhileStmt::translateStmt(SymbolTable* table, IRNode*& tail) {
     std::string condLabel = table->newLabel();
     std::string bodyLabel = table->newLabel();
     std::string endLabel = table->newLabel();
-    printToFile(outputFile, indent, "LABEL %s:\n", condLabel.c_str());
-    cond_->translateCond(table, bodyLabel, endLabel, indent);
-    printToFile(outputFile, indent, "LABEL %s:\n", bodyLabel.c_str());
-    body_->translateStmt(table, indent);
-    printToFile(outputFile, indent, "GOTO %s\n", condLabel.c_str());
-    printToFile(outputFile, indent, "LABEL %s:\n", endLabel.c_str());
+    linkToTail(tail, new Label(condLabel));
+    cond_->translateCond(table, bodyLabel, endLabel, tail);
+    linkToTail(tail, new Label(bodyLabel));
+    body_->translateStmt(table, tail);
+    linkToTail(tail, new Goto(condLabel));
+    linkToTail(tail, new Label(endLabel));
 }
 
-void ReturnStmt::translateStmt(SymbolTable* table, int indent) {
+void ReturnStmt::translateStmt(SymbolTable* table, IRNode*& tail) {
     if (ret_) {
         std::string retPlace = table->newTemp();
-        ret_->translateExp(table, retPlace, indent, false);
-        printToFile(outputFile, indent, "RETURN %s\n", retPlace.c_str());
+        ret_->translateExp(table, retPlace, false, tail);
+        linkToTail(tail, new ReturnWithVal(Identifier(retPlace)));
     } else {
-        printToFile(outputFile, indent, "RETURN\n");
+        linkToTail(tail, new Return());
     }
 }
 
-void CallExp::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
+void CallExp::translateExp(SymbolTable* table, std::string& place, bool ignoreReturn, IRNode*& tail) {
     if (place.empty() && !ignoreReturn) {
         place = table->newTemp();
     }
@@ -453,72 +443,72 @@ void CallExp::translateExp(SymbolTable* table, std::string& place, int indent, b
     if (params_) {
         for (auto param : params_->getParams()) {
             std::string paramPlace = table->newTemp();
-            param->translateExp(table, paramPlace, indent, false);
-            printToFile(outputFile, indent, "ARG %s\n", paramPlace.c_str());
+            param->translateExp(table, paramPlace, false, tail);
+            linkToTail(tail, new Arg(Identifier(paramPlace)));
         }
     }
     if (ignoreReturn) {
-        printToFile(outputFile, indent, "CALL %s\n", function.c_str());
+        linkToTail(tail, new Call(function));
     } else {
-        printToFile(outputFile, indent, "%s = CALL %s\n", place.c_str(), function.c_str());
+        linkToTail(tail, new CallWithRet(Identifier(place), function));
     }
 }
 
-void UnaryExp::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
+void UnaryExp::translateExp(SymbolTable* table, std::string& place, bool ignoreReturn, IRNode*& tail) {
     if (place.empty()) {
         place = table->newTemp();
     }
 
     std::string expPlace = table->newTemp();
-    exp_->translateExp(table, expPlace, indent, false);
-    printToFile(outputFile, indent, "%s = %s%s\n", place.c_str(), op_, expPlace.c_str());
+    exp_->translateExp(table, expPlace, false, tail);
+    linkToTail(tail, new Unop(Identifier(place), Identifier(expPlace), op_));
 }
 
-void UnaryExp::translateCond(SymbolTable* table, std::string trueLabel, std::string falseLabel, int indent) {
+void UnaryExp::translateCond(SymbolTable* table, std::string trueLabel, std::string falseLabel, IRNode*& tail) {
     if (op_[0] == '!') {
-        return exp_->translateCond(table, falseLabel, trueLabel, indent);
+        return exp_->translateCond(table, falseLabel, trueLabel, tail);
     } else {
-        Exp::translateCond(table, trueLabel, falseLabel, indent);
+        Exp::translateCond(table, trueLabel, falseLabel, tail);
     }
 }
 
-void BinaryExp::translateExp(SymbolTable* table, std::string& place, int indent, bool ignoreReturn) {
+void BinaryExp::translateExp(SymbolTable* table, std::string& place, bool ignoreReturn, IRNode*& tail) {
     if (place.empty()) {
         place = table->newTemp();
     }
 
     std::string left = "";
     std::string right = "";
-    lhs_->translateExp(table, left, indent, false);
-    rhs_->translateExp(table, right, indent, false);
-    handlePointer(table, left, indent);
-    handlePointer(table, right, indent);
-    printToFile(outputFile, indent, "%s = %s %s %s\n", place.c_str(), left.c_str(), op_, right.c_str());
+    lhs_->translateExp(table, left, false, tail);
+    rhs_->translateExp(table, right, false, tail);
+    handlePointer(table, left, tail);
+    handlePointer(table, right, tail);
+    linkToTail(tail, new Binop(Identifier(place), Identifier(left), Identifier(right), op_));
 }
 
-void RelExp::translateCond(SymbolTable* table, std::string trueLabel, std::string falseLabel, int indent) {
+void RelExp::translateCond(SymbolTable* table, std::string trueLabel, std::string falseLabel, IRNode*& tail) {
     std::string left = table->newTemp();
     std::string right = table->newTemp();
-    lhs_->translateExp(table, left, indent, false);
-    rhs_->translateExp(table, right, indent, false);
-    printToFile(outputFile, indent, "IF %s %s %s GOTO %s\n", left.c_str(), op_, right.c_str(), trueLabel.c_str());
-    printToFile(outputFile, indent, "GOTO %s\n", falseLabel.c_str());
+    lhs_->translateExp(table, left, false, tail);
+    rhs_->translateExp(table, right, false, tail);
+    linkToTail(tail, new CondGoto(Identifier(left), Identifier(right), op_, trueLabel));
+    linkToTail(tail, new Goto(falseLabel));
 }
 
-void LogicExp::translateCond(SymbolTable* table, std::string trueLabel, std::string falseLabel, int indent) {
+void LogicExp::translateCond(SymbolTable* table, std::string trueLabel, std::string falseLabel, IRNode*& tail) {
     std::string leftLabel = table->newLabel();
     switch (op_[0]) {
         case '&': {
-            lhs_->translateCond(table, leftLabel, falseLabel, indent);
+            lhs_->translateCond(table, leftLabel, falseLabel, tail);
             break;
         }
         case '|': {
-            lhs_->translateCond(table, trueLabel, leftLabel, indent);
+            lhs_->translateCond(table, trueLabel, leftLabel, tail);
             break;
         }
         default:
             throw std::runtime_error("unknown logic operator");
     }
-    printToFile(outputFile, indent, "LABEL %s:\n", leftLabel.c_str());
-    rhs_->translateCond(table, trueLabel, falseLabel, indent);
+    linkToTail(tail, new Label(leftLabel));
+    rhs_->translateCond(table, trueLabel, falseLabel, tail);
 }

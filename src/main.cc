@@ -1,4 +1,5 @@
 #include "ast.h"
+#include <string.h>
 
 extern int yylineno;
 extern int yyparse();
@@ -7,7 +8,7 @@ extern void yyrestart(FILE*);
 BaseStmt* root = nullptr;
 bool errorFlag = false;
 char* inputFilename;
-FILE *inputFile, *outputFile;
+FILE *inputFile, *outputFile, *immediateFile;
 Table* globalTable = new Table();
 SymbolTable* symbolTable = new SymbolTable();
 
@@ -40,14 +41,28 @@ int main(int argc, char** argv) {
     }
 
     // generate intermediate code
+    immediateFile = argc == 3 ? fopen(strcat(argv[2], ".ir"), "w") : stdout;
+    if (!immediateFile) {
+        perror(argv[2]);
+        return -1;
+    }
     outputFile = argc == 3 ? fopen(argv[2], "w") : stdout;
     if (!outputFile) {
         perror(argv[2]);
         return -1;
     }
-    root->translateStmt(symbolTable, 0);
+
+    IRNode *irRoot = new IRNode(), *irTail = irRoot;
+    root->translateStmt(symbolTable, irTail);
+    for (IRNode *ir = irRoot->next; ir != nullptr; ir = ir->next) {
+        ir->print();
+    }
+    delete irRoot;
+
     fclose(inputFile);
     inputFile = nullptr;
+    fclose(immediateFile);
+    immediateFile = nullptr;
     fclose(outputFile);
     outputFile = nullptr;
 
