@@ -2,6 +2,7 @@
 #define _AST_H_
 
 #include "ir.h"
+#include "common.h"
 #include <cstdio>
 #include <vector>
 #include <stack>

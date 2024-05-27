@@ -166,7 +166,8 @@ static void translateArrayInitlist(std::vector<int>& size, int l, int r, InitVal
                 linkToTail(tail, new Word(Immediate(0)));
             } else {
                 linkToTail(tail, new Store(Identifier(initPlace), Identifier(numPlace)));
-                linkToTail(tail, new BinopImm(Identifier(initPlace), Identifier(initPlace), Immediate(4), "+"));
+                linkToTail(tail,
+                           new BinopImm(Identifier(initPlace), Identifier(initPlace), Immediate(SIZE_OF_INT), "+"));
             }
         }
         return;
@@ -193,7 +194,8 @@ static void translateArrayInitlist(std::vector<int>& size, int l, int r, InitVal
             } else {
                 val->getVal()->translateExp(table, numPlace, false, tail);
                 linkToTail(tail, new Store(Identifier(initPlace), Identifier(numPlace)));
-                linkToTail(tail, new BinopImm(Identifier(initPlace), Identifier(initPlace), Immediate(4), "+"));
+                linkToTail(tail,
+                           new BinopImm(Identifier(initPlace), Identifier(initPlace), Immediate(SIZE_OF_INT), "+"));
             }
             ++finishedNum;
         }
@@ -208,7 +210,7 @@ static void translateArrayInitlist(std::vector<int>& size, int l, int r, InitVal
             linkToTail(tail, new Word(Immediate(0)));
         } else {
             linkToTail(tail, new Store(Identifier(initPlace), Identifier(numPlace)));
-            linkToTail(tail, new BinopImm(Identifier(initPlace), Identifier(initPlace), Immediate(4), "+"));
+            linkToTail(tail, new BinopImm(Identifier(initPlace), Identifier(initPlace), Immediate(SIZE_OF_INT), "+"));
         }
     }
 }
@@ -228,7 +230,7 @@ void VarDef::translateStmt(SymbolTable* table, IRNode*& tail) {
         }
 
         if (!table->isGlobalLayer()) {
-            linkToTail(tail, new VarDec(Identifier(name), Immediate(totalSize * 4)));
+            linkToTail(tail, new VarDec(Identifier(name), Immediate(totalSize * SIZE_OF_INT)));
         }
         if (init_) {
             std::string initPlace = "", zeroPlace = "";
@@ -331,14 +333,18 @@ void LVal::translateExp(SymbolTable* table, std::string& place, bool ignoreRetur
         std::vector<IntConst*> size = table->lookupArray(name);
         std::string offset = table->newTemp();
         std::vector<Exp*> dims = arr_->getDims();
-        int block = 4;  // size of int
+        int block = SIZE_OF_INT;  // size of int
         std::string blockPlace = table->newTemp();
         std::string curOffset = table->newTemp();
 
         if (table->isGlobal(name)) {
             linkToTail(tail, new LoadGlobal(Identifier(offset), Identifier(name)));
         } else {
-            linkToTail(tail, new Assign(Identifier(offset), Identifier(name)));
+            if (name[0] == '*') {
+                linkToTail(tail, new Load(Identifier(offset), Identifier(name.substr(1))));
+            } else {
+                linkToTail(tail, new Assign(Identifier(offset), Identifier(name)));
+            }
         }
 
         // align
@@ -379,7 +385,11 @@ void LVal::translateExp(SymbolTable* table, std::string& place, bool ignoreRetur
     if (place.empty()) {
         place = name;
     } else {
-        linkToTail(tail, new Assign(Identifier(place), Identifier(name)));
+        if (name[0] == '*') {
+            linkToTail(tail, new Load(Identifier(place), Identifier(name.substr(1))));
+        } else {
+            linkToTail(tail, new Assign(Identifier(place), Identifier(name)));
+        }
     }
 }
 
