@@ -7,7 +7,7 @@ extern FILE* immediateFile;
 static void printToFile(FILE* file, const char* format, ...) {
     if (strncmp(format, "LABEL", 5) == 0) {
         fprintf(file, "  ");
-    } else if (strncmp(format, "FUNCTION", 8) != 0) {
+    } else if (strncmp(format, "FUNCTION", 8) != 0 && strncmp(format, "GLOBAL", 6) != 0) {
         fprintf(file, "    ");
     }
 
@@ -26,24 +26,38 @@ static void linkToTail(AssemblyNode*& tail, AssemblyNode* target) {
     tail = target;
 }
 
-int GenerateTable::insert(std::string ident, int size) {
+int GenerateTable::insert(std::string ident, int size, bool storeAddr) {
     if (identMap.find(ident) != identMap.end()) {
         return 0;
     }
     stackOffset += size;
-    identMap[ident] = stackOffset;
+    identMap[ident] = stackOffset * (storeAddr ? -1 : 1);
     return size;
+}
+
+void GenerateTable::allocateReg(Register reg, int offset, AssemblyNode*& tail) {
+    if (offset < 0) {
+        linkToTail(tail, new Mv(reg, Register(2)));
+        linkToTail(tail, new BinaryImmAssembly(reg, reg, ImmAssembly(abs(offset) + preservedOffset), "+"));
+    } else {
+        linkToTail(tail, new Lw(reg, Register(2), ImmAssembly(offset + preservedOffset)));
+    }
 }
 
 Register GenerateTable::allocateTemp(std::string ident, AssemblyNode*& tail) {
     if (identMap.find(ident) == identMap.end()) {
-        throw std::runtime_error("allocateTemp: Identifier" + ident + " not found in table");
+        if (spillParams.empty() || std::find(spillParams.begin(), spillParams.end(), ident) == spillParams.end()) {
+            throw std::runtime_error("allocateTemp: Identifier " + ident + " not found in table");
+        }
+        identMap[ident] =
+            stackOffset + preservedOffset +
+            (std::find(spillParams.begin(), spillParams.end(), ident) - spillParams.begin()) * SIZE_OF_INT;
     }
     for (int i : TEMP_REGISTERS) {
         if (registers[i].empty()) {
             registers[i] = ident;
             Register reg(i);
-            linkToTail(tail, new Lw(reg, Register(2), ImmAssembly(identMap[ident])));
+            allocateReg(reg, identMap[ident], tail);
             return reg;
         }
     }
@@ -52,26 +66,42 @@ Register GenerateTable::allocateTemp(std::string ident, AssemblyNode*& tail) {
 
 Register GenerateTable::allocateArg(std::string ident, AssemblyNode*& tail) {
     if (identMap.find(ident) == identMap.end()) {
-        throw std::runtime_error("allocateArg: Identifier" + ident + " not found in table");
+        throw std::runtime_error("allocateArg: Identifier " + ident + " not found in table");
     }
     for (int i : ARG_REGISTERS) {
         if (registers[i].empty()) {
             registers[i] = ident;
             Register reg(i);
-            linkToTail(tail, new Lw(reg, Register(2), ImmAssembly(identMap[ident])));
+            allocateReg(reg, identMap[ident], tail);
             return reg;
         }
     }
-    throw std::runtime_error("No available register");
+    // spill to stack
+    Register reg = allocateTemp(ident, tail);  // TODO: 最好能用a*寄存器
+    allocateReg(reg, identMap[ident], tail);
+    linkToTail(tail, new Sw(reg, Register(2), ImmAssembly(preservedUsed)));
+    preservedUsed += SIZE_OF_INT;
+    free(reg, tail, false);
+    return Register(0);
 }
 
-void GenerateTable::free(Register reg, AssemblyNode*& tail) {
+void GenerateTable::free(Register reg, AssemblyNode*& tail, bool storeAddr) {
     int i = reg.index;
     if (registers[i].empty()) {
         return;
     }
-    linkToTail(tail, new Sw(reg, Register(2), ImmAssembly(identMap[registers[i]])));
+    if (storeAddr) {
+        linkToTail(tail, new Sw(reg, Register(2), ImmAssembly(abs(identMap[registers[i]]))));
+    }
     registers[i] = "";
+}
+
+void GenerateTable::clearStack() {
+    stackOffset = 0;
+    preservedOffset = 0;
+    identMap.clear();
+    spillParams.clear();
+    params.clear();
 }
 
 void LoadImm::print() { printToFile(immediateFile, "%s = #%d\n", ident.ident.c_str(), value.value); }
@@ -79,7 +109,7 @@ void LoadImm::print() { printToFile(immediateFile, "%s = #%d\n", ident.ident.c_s
 void LoadImm::generate(GenerateTable* table, AssemblyNode*& tail) {
     Register reg = table->allocateTemp(ident.ident, tail);
     linkToTail(tail, new Li(reg, ImmAssembly(value.value)));
-    table->free(reg, tail);
+    table->free(reg, tail, true);
 }
 
 void Assign::print() { printToFile(immediateFile, "%s = %s\n", lhs.ident.c_str(), rhs.ident.c_str()); }
@@ -88,8 +118,8 @@ void Assign::generate(GenerateTable* table, AssemblyNode*& tail) {
     Register lhsReg = table->allocateTemp(lhs.ident, tail);
     Register rhsReg = table->allocateTemp(rhs.ident, tail);
     linkToTail(tail, new Mv(lhsReg, rhsReg));
-    table->free(lhsReg, tail);
-    table->free(rhsReg, tail);
+    table->free(lhsReg, tail, true);
+    table->free(rhsReg, tail, false);
 }
 
 void Binop::print() {
@@ -102,9 +132,9 @@ void Binop::generate(GenerateTable* table, AssemblyNode*& tail) {
     Register rhs1Reg = table->allocateTemp(rhs1.ident, tail);
     Register rhs2Reg = table->allocateTemp(rhs2.ident, tail);
     linkToTail(tail, new BinaryAssembly(lhsReg, rhs1Reg, rhs2Reg, op));
-    table->free(lhsReg, tail);
-    table->free(rhs1Reg, tail);
-    table->free(rhs2Reg, tail);
+    table->free(lhsReg, tail, true);
+    table->free(rhs1Reg, tail, false);
+    table->free(rhs2Reg, tail, false);
 }
 
 void BinopImm::print() {
@@ -115,8 +145,8 @@ void BinopImm::generate(GenerateTable* table, AssemblyNode*& tail) {
     Register lhsReg = table->allocateTemp(lhs.ident, tail);
     Register rhsReg = table->allocateTemp(rhs.ident, tail);
     linkToTail(tail, new BinaryImmAssembly(lhsReg, rhsReg, ImmAssembly(imm.value), op));
-    table->free(lhsReg, tail);
-    table->free(rhsReg, tail);
+    table->free(lhsReg, tail, true);
+    table->free(rhsReg, tail, false);
 }
 
 void Unop::print() { printToFile(immediateFile, "%s = %s%s\n", lhs.ident.c_str(), op.c_str(), rhs.ident.c_str()); }
@@ -134,8 +164,8 @@ void Unop::generate(GenerateTable* table, AssemblyNode*& tail) {
         default:
             throw std::runtime_error("Invalid unary operator");
     }
-    table->free(lhsReg, tail);
-    table->free(rhsReg, tail);
+    table->free(lhsReg, tail, true);
+    table->free(rhsReg, tail, false);
 }
 
 void Load::print() { printToFile(immediateFile, "%s = *%s\n", lhs.ident.c_str(), rhs.ident.c_str()); }
@@ -144,8 +174,8 @@ void Load::generate(GenerateTable* table, AssemblyNode*& tail) {
     Register lhsReg = table->allocateTemp(lhs.ident, tail);
     Register rhsReg = table->allocateTemp(rhs.ident, tail);
     linkToTail(tail, new Lw(lhsReg, rhsReg));
-    table->free(lhsReg, tail);
-    table->free(rhsReg, tail);
+    table->free(lhsReg, tail, true);
+    table->free(rhsReg, tail, false);
 }
 
 void Store::print() { printToFile(immediateFile, "*%s = %s\n", lhs.ident.c_str(), rhs.ident.c_str()); }
@@ -153,9 +183,9 @@ void Store::print() { printToFile(immediateFile, "*%s = %s\n", lhs.ident.c_str()
 void Store::generate(GenerateTable* table, AssemblyNode*& tail) {
     Register lhsReg = table->allocateTemp(lhs.ident, tail);
     Register rhsReg = table->allocateTemp(rhs.ident, tail);
-    linkToTail(tail, new Sw(lhsReg, rhsReg));
-    table->free(lhsReg, tail);
-    table->free(rhsReg, tail);
+    linkToTail(tail, new Sw(rhsReg, lhsReg));
+    table->free(lhsReg, tail, false);
+    table->free(rhsReg, tail, false);
 }
 
 void Label::print() { printToFile(immediateFile, "LABEL %s:\n", name.c_str()); }
@@ -175,23 +205,30 @@ void CondGoto::generate(GenerateTable* table, AssemblyNode*& tail) {
     Register lhsReg = table->allocateTemp(lhs.ident, tail);
     Register rhsReg = table->allocateTemp(rhs.ident, tail);
     linkToTail(tail, new Branch(lhsReg, rhsReg, label, op));
-    table->free(lhsReg, tail);
-    table->free(rhsReg, tail);
+    table->free(lhsReg, tail, false);
+    table->free(rhsReg, tail, false);
 }
 
 void FuncDefNode::print() { printToFile(immediateFile, "FUNCTION %s:\n", name.ident.c_str()); }
 
 void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
     // prologue
-    table->clearStackOffset();
-    int prologueSize = SIZE_OF_INT;
+    table->clearStack();
+    table->curParam = 0;
+    int prologueSize = 0;
+    bool foundCall = false;
     for (IRNode* cur = this->next; cur != nullptr; cur = cur->next) {
         if (typeid(*cur) == typeid(FuncDefNode)) {
             break;
         }
         prologueSize += cur->prologue(table);
+        foundCall |= typeid(*cur) == typeid(CallWithRet) || typeid(*cur) == typeid(Call);
     }
-    table->insert("_ra", SIZE_OF_INT);
+    if (foundCall) {
+        prologueSize += SIZE_OF_INT;
+        table->insert("_ra", SIZE_OF_INT);
+    }
+
     linkToTail(tail, new LabelAssembly(name.ident));
     if (prologueSize > 0) {
         if (prologueSize > 2048) {
@@ -200,12 +237,20 @@ void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
             linkToTail(tail, new BinaryImmAssembly(Register(2), Register(2), ImmAssembly(-prologueSize), "+"));
         }
     }
-    linkToTail(tail, new Sw(Register(1), Register(2), table->getStatckOffset()));    // ra
+    if (foundCall) {
+        linkToTail(tail, new Sw(Register(1), Register(2), table->getOffset("_ra")));
+    }
+
+    // save arguments
+    for (int i = 0; i < std::min(table->curParam, 8); i++) {
+        linkToTail(tail, new Sw(Register(i + 10), Register(2), table->getOffset(table->params[i])));
+    }
 }
 
 static void freeArgs(GenerateTable* table, AssemblyNode*& tail) {
+    table->clearPreservedUsed();
     for (int i : ARG_REGISTERS) {
-        table->free(Register(i), tail);
+        table->free(Register(i), tail, false);
     }
 }
 
@@ -215,7 +260,7 @@ void CallWithRet::generate(GenerateTable* table, AssemblyNode*& tail) {
     Register lhsReg = table->allocateTemp(lhs.ident, tail);
     linkToTail(tail, new CallAssembly(name));
     linkToTail(tail, new Mv(lhsReg, Register(10)));
-    table->free(lhsReg, tail);
+    table->free(lhsReg, tail, true);
     freeArgs(table, tail);
 }
 
@@ -233,15 +278,20 @@ void Param::generate(GenerateTable* table, AssemblyNode*& tail) {}
 void Arg::print() { printToFile(immediateFile, "ARG %s\n", ident.ident.c_str()); }
 
 void Arg::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register identReg = table->allocateArg(ident.ident, tail);
-    Register argReg = table->allocateTemp(ident.ident, tail);
-    linkToTail(tail, new Mv(identReg, argReg));
-    table->free(identReg, tail);
+    Register argReg = table->allocateArg(ident.ident, tail);
+    if (argReg.index == 0) {
+        return;
+    }
+    Register identReg = table->allocateTemp(ident.ident, tail);
+    linkToTail(tail, new Mv(argReg, identReg));
+    table->free(identReg, tail, false);
 }
 
 static void epilogue(GenerateTable* table, AssemblyNode*& tail) {
-    linkToTail(tail, new Lw(Register(1), Register(2), table->getStatckOffset()));    // ra
-    linkToTail(tail, new BinaryImmAssembly(Register(2), Register(2), ImmAssembly(table->getStatckOffset()), "+"));
+    if (table->identExists("_ra")) {
+        linkToTail(tail, new Lw(Register(1), Register(2), table->getOffset("_ra")));
+    }
+    linkToTail(tail, new BinaryImmAssembly(Register(2), Register(2), ImmAssembly(table->getStackOffset()), "+"));
 }
 
 void ReturnWithVal::print() { printToFile(immediateFile, "RETURN %s\n", ident.ident.c_str()); }
@@ -266,12 +316,21 @@ void VarDec::generate(GenerateTable* table, AssemblyNode*& tail) {}
 
 void GlobalVar::print() { printToFile(immediateFile, "GLOBAL %s:\n", ident.ident.c_str()); }
 
-void GlobalVar::generate(GenerateTable* table, AssemblyNode*& tail) {}
+void GlobalVar::generate(GenerateTable* table, AssemblyNode*& tail) {
+    table->insertGlobal(ident.ident);
+    linkToTail(tail, new LabelAssembly(ident.ident));
+}
 
 void LoadGlobal::print() { printToFile(immediateFile, "%s = &%s\n", lhs.ident.c_str(), rhs.ident.c_str()); }
 
-void LoadGlobal::generate(GenerateTable* table, AssemblyNode*& tail) {}
+void LoadGlobal::generate(GenerateTable* table, AssemblyNode*& tail) {
+    Register lhsReg = table->allocateTemp(lhs.ident, tail);
+    linkToTail(tail, new La(lhsReg, rhs.ident));
+    table->free(lhsReg, tail, true);
+}
 
 void Word::print() { printToFile(immediateFile, ".WORD #%d\n", imm.value); }
 
-void Word::generate(GenerateTable* table, AssemblyNode*& tail) {}
+void Word::generate(GenerateTable* table, AssemblyNode*& tail) {
+    linkToTail(tail, new WordAssembly(ImmAssembly(imm.value)));
+}

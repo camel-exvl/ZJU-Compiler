@@ -458,9 +458,9 @@ void CallExp::translateExp(SymbolTable* table, std::string& place, bool ignoreRe
         }
     }
     if (ignoreReturn) {
-        linkToTail(tail, new Call(function));
+        linkToTail(tail, new Call(function, params_ ? params_->getParams().size() : 0));
     } else {
-        linkToTail(tail, new CallWithRet(Identifier(place), function));
+        linkToTail(tail, new CallWithRet(Identifier(place), function, params_ ? params_->getParams().size() : 0));
     }
 }
 

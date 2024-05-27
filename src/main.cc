@@ -10,8 +10,6 @@ BaseStmt *root = nullptr;
 bool errorFlag = false;
 char *inputFilename;
 FILE *inputFile, *outputFile, *immediateFile;
-Table *globalTable = new Table();
-SymbolTable *symbolTable = new SymbolTable();
 
 int main(int argc, char **argv) {
     if (argc < 2 || argc > 3) {
@@ -31,10 +29,12 @@ int main(int argc, char **argv) {
     yyrestart(inputFile);
     yyparse();
 
+    Table *globalTable = new Table();
     if (root) {
         // root->print();
         root->typeCheck(globalTable);
     }
+    delete globalTable;
     if (errorFlag) {
         fclose(inputFile);
         inputFile = nullptr;
@@ -53,26 +53,45 @@ int main(int argc, char **argv) {
     }
 
     // generate intermediate code
+    SymbolTable *symbolTable = new SymbolTable();
     IRNode *irRoot = new IRNode(), *irTail = irRoot;
     root->translateStmt(symbolTable, irTail);
     for (IRNode *ir = irRoot->next; ir != nullptr; ir = ir->next) {
         ir->print();
     }
+    delete symbolTable;
 
     // generate assembly code
     AssemblyNode *asmRoot = new AssemblyNode(), *asmTail = asmRoot;
     GenerateTable *table = new GenerateTable();
-    for (IRNode *ir = irRoot->next; ir != nullptr; ir = ir->next) {
-        ir->generate(table, asmTail);
+    // data
+    fprintf(outputFile, "%s", DATA.c_str());
+    IRNode *ir = irRoot->next;
+    for (; ir != nullptr; ir = ir->next) {
+        if (typeid(*ir) == typeid(GlobalVar) || typeid(*ir) == typeid(Word)) {
+            ir->generate(table, asmTail);
+        } else {
+            break;
+        }
     }
-    fprintf(outputFile, "%s", TEXT.c_str());
     for (AssemblyNode *cur = asmRoot->next; cur != nullptr; cur = cur->next) {
         cur->print();
     }
-    fprintf(outputFile, "%s", DATA.c_str());
+    // text
+    delete asmRoot;
+    asmRoot = new AssemblyNode();
+    asmTail = asmRoot;
+    fprintf(outputFile, "%s", TEXT.c_str());
+    for (; ir != nullptr; ir = ir->next) {
+        ir->generate(table, asmTail);
+    }
+    for (AssemblyNode *cur = asmRoot->next; cur != nullptr; cur = cur->next) {
+        cur->print();
+    }
 
     delete irRoot;
     delete asmRoot;
+    delete table;
 
     fclose(inputFile);
     inputFile = nullptr;

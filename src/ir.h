@@ -5,21 +5,38 @@
 #include "common.h"
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <algorithm>
 #include <vector>
 #include <stdexcept>
 
 class GenerateTable {
    public:
-    int insert(std::string ident, int size);
+    int insert(std::string ident, int size, bool storeAddr = false);  // storeAddr is true for local array
+    void insertStack(std::string ident) { spillParams.push_back(ident); }
     Register allocateTemp(std::string ident, AssemblyNode *&tail);
     Register allocateArg(std::string ident, AssemblyNode *&tail);
-    void free(Register reg, AssemblyNode *&tail);
-    int getStatckOffset() { return stackOffset; }
-    void clearStackOffset() { stackOffset = 0; }
+    void free(Register reg, AssemblyNode *&tail, bool storeAddr);
 
+    void clearStack();
+    void clearPreservedUsed() { preservedUsed = 0; }
+    bool identExists(std::string ident) { return identMap.find(ident) != identMap.end(); }
+    int getOffset(std::string ident) { return identMap[ident]; }
+    int getStackOffset() { return stackOffset; }
+    void setPreserved(int size) { preservedOffset = std::max(preservedOffset, size); }
+
+    void insertGlobal(std::string ident) { globalSet.insert(ident); }
+
+    int curParam;  // current function parameter count
+    std::vector<std::string> spillParams;
+    std::vector<std::string> params;
    private:
+    void allocateReg(Register reg, int offset, AssemblyNode *&tail);
     int stackOffset = 0;
-    std::unordered_map<std::string, int> identMap;
+    int preservedOffset = 0;                        // preserve for more args
+    int preservedUsed = 0;                          // used for more args
+    std::unordered_map<std::string, int> identMap;  // identifier -> offset(negative is array)
+    std::unordered_set<std::string> globalSet;
     std::string registers[32];
 };
 
@@ -176,7 +193,7 @@ class FuncDefNode : public IRNode {
 
 class CallWithRet : public IRNode {
    public:
-    CallWithRet(Identifier lhs, std::string name) : lhs(lhs), name(name) {}
+    CallWithRet(Identifier lhs, std::string name, int argCount) : lhs(lhs), name(name), argCount(argCount) {}
     void print() override;
     int prologue(GenerateTable *table) override { return table->insert(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
@@ -184,23 +201,35 @@ class CallWithRet : public IRNode {
    private:
     Identifier lhs;
     std::string name;
+    int argCount;
 };
 
 class Call : public IRNode {
    public:
-    Call(std::string name) : name(name) {}
+    Call(std::string name, int argCount) : name(name), argCount(argCount) {}
     void print() override;
+    int prologue(GenerateTable *table) override { return std::max(0, argCount - 8) * SIZE_OF_INT; }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
     std::string name;
+    int argCount;
 };
 
 class Param : public IRNode {
    public:
     Param(Identifier ident) : ident(ident) {}
     void print() override;
-    int prologue(GenerateTable *table) override { return table->insert(ident.ident, SIZE_OF_INT); }
+    int prologue(GenerateTable *table) override {
+        ++table->curParam;
+        table->params.push_back(ident.ident);
+        if (table->curParam <= 8) {
+            return table->insert(ident.ident, SIZE_OF_INT);
+        } else {
+            table->insertStack(ident.ident);
+            return 0;
+        }
+    }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -238,7 +267,7 @@ class VarDec : public IRNode {
    public:
     VarDec(Identifier ident, Immediate size) : ident(ident), size(size) {}
     void print() override;
-    int prologue(GenerateTable *table) override { return table->insert(ident.ident, size.value); }
+    int prologue(GenerateTable *table) override { return table->insert(ident.ident, size.value, true); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
