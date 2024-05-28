@@ -31,12 +31,13 @@ class GenerateTable {
     std::vector<std::string> spillParams;
     std::vector<std::string> params;
    private:
-    void allocateReg(Register reg, int offset, AssemblyNode *&tail);
+    void allocateReg(Register reg, int offset, AssemblyNode *&tail, bool isArray);
     int stackOffset = 0;
     int preservedOffset = 0;                        // preserve for more args
     int preservedUsed = 0;                          // used for more args
     std::unordered_map<std::string, int> identMap;  // identifier -> offset(negative is array)
     std::unordered_set<std::string> globalSet;
+    std::unordered_set<std::string> arraySet;
     std::string registers[32];
 };
 

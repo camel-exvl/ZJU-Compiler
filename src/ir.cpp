@@ -30,13 +30,16 @@ int GenerateTable::insert(std::string ident, int size, bool storeAddr) {
     if (identMap.find(ident) != identMap.end()) {
         return 0;
     }
+    if (storeAddr) {
+        arraySet.insert(ident);
+    }
+    identMap[ident] = stackOffset;
     stackOffset += size;
-    identMap[ident] = stackOffset * (storeAddr ? -1 : 1);
     return size;
 }
 
-void GenerateTable::allocateReg(Register reg, int offset, AssemblyNode*& tail) {
-    if (offset < 0) {
+void GenerateTable::allocateReg(Register reg, int offset, AssemblyNode*& tail, bool isArray) {
+    if (isArray) {
         linkToTail(tail, new Mv(reg, Register(2)));
         linkToTail(tail, new BinaryImmAssembly(reg, reg, ImmAssembly(abs(offset) + preservedOffset), "+"));
     } else {
@@ -57,7 +60,7 @@ Register GenerateTable::allocateTemp(std::string ident, AssemblyNode*& tail) {
         if (registers[i].empty()) {
             registers[i] = ident;
             Register reg(i);
-            allocateReg(reg, identMap[ident], tail);
+            allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end());
             return reg;
         }
     }
@@ -72,13 +75,13 @@ Register GenerateTable::allocateArg(std::string ident, AssemblyNode*& tail) {
         if (registers[i].empty()) {
             registers[i] = ident;
             Register reg(i);
-            allocateReg(reg, identMap[ident], tail);
+            allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end());
             return reg;
         }
     }
     // spill to stack
     Register reg = allocateTemp(ident, tail);  // TODO: 最好能用a*寄存器
-    allocateReg(reg, identMap[ident], tail);
+    allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end());
     linkToTail(tail, new Sw(reg, Register(2), ImmAssembly(preservedUsed)));
     preservedUsed += SIZE_OF_INT;
     free(reg, tail, false);
@@ -102,6 +105,7 @@ void GenerateTable::clearStack() {
     identMap.clear();
     spillParams.clear();
     params.clear();
+    arraySet.clear();
 }
 
 void LoadImm::print() { printToFile(immediateFile, "%s = #%d\n", ident.ident.c_str(), value.value); }
@@ -301,6 +305,7 @@ void ReturnWithVal::generate(GenerateTable* table, AssemblyNode*& tail) {
     linkToTail(tail, new Mv(Register(10), retReg));
     epilogue(table, tail);
     linkToTail(tail, new Ret());
+    table->free(retReg, tail, false);
 }
 
 void Return::print() { printToFile(immediateFile, "RETURN\n"); }
