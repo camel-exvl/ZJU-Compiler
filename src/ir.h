@@ -14,24 +14,29 @@ class GenerateTable {
    public:
     int insert(std::string ident, int size, bool storeAddr = false);  // storeAddr is true for local array
     void insertStack(std::string ident) { spillParams.push_back(ident); }
-    Register allocateTemp(std::string ident, AssemblyNode *&tail);
+    Register allocateTemp(std::string ident, AssemblyNode *&tail, bool needLoad);
     Register allocateArg(std::string ident, AssemblyNode *&tail);
-    void free(Register reg, AssemblyNode *&tail, bool storeAddr);
+    void free(Register reg, AssemblyNode *&tail, bool needStore);
+    void clear(Register reg, AssemblyNode *&tail, bool needStore);
 
     void clearStack();
     void clearPreservedUsed() { preservedUsed = 0; }
     bool identExists(std::string ident) { return identMap.find(ident) != identMap.end(); }
-    int getOffset(std::string ident) { return identMap[ident]; }
+    int getOffset(std::string ident) { return identMap[ident] + preservedOffset; }
     int getStackOffset() { return stackOffset; }
     void setPreserved(int size) { preservedOffset = std::max(preservedOffset, size); }
+    int getPreserved() { return preservedOffset; }
 
     void insertGlobal(std::string ident) { globalSet.insert(ident); }
 
     int curParam;  // current function parameter count
     std::vector<std::string> spillParams;
     std::vector<std::string> params;
+
+    int preservedOffsetCurCall = 0;
+
    private:
-    void allocateReg(Register reg, int offset, AssemblyNode *&tail, bool isArray);
+    void allocateReg(Register reg, int offset, AssemblyNode *&tail, bool isArray, bool needLoad);
     int stackOffset = 0;
     int preservedOffset = 0;                        // preserve for more args
     int preservedUsed = 0;                          // used for more args
@@ -39,6 +44,7 @@ class GenerateTable {
     std::unordered_set<std::string> globalSet;
     std::unordered_set<std::string> arraySet;
     std::string registers[32];
+    int regUsed[32] = {0};  // low bit = 1 if register is used, high bit = 1 if register need sw
 };
 
 class IRNode {
@@ -209,7 +215,10 @@ class Call : public IRNode {
    public:
     Call(std::string name, int argCount) : name(name), argCount(argCount) {}
     void print() override;
-    int prologue(GenerateTable *table) override { return std::max(0, argCount - 8) * SIZE_OF_INT; }
+    int prologue(GenerateTable *table) override {
+        table->preservedOffsetCurCall = 0;
+        return std::max(0, argCount - 8) * SIZE_OF_INT;
+    }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -241,6 +250,13 @@ class Arg : public IRNode {
    public:
     Arg(Identifier ident) : ident(ident) {}
     void print() override;
+    int prologue(GenerateTable *table) override {
+        ++table->preservedOffsetCurCall;
+        if (table->preservedOffsetCurCall > 8) {
+            table->setPreserved((table->preservedOffsetCurCall - 8) * SIZE_OF_INT);
+        }
+        return 0;
+    }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:

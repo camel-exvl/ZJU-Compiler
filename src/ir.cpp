@@ -38,29 +38,47 @@ int GenerateTable::insert(std::string ident, int size, bool storeAddr) {
     return size;
 }
 
-void GenerateTable::allocateReg(Register reg, int offset, AssemblyNode*& tail, bool isArray) {
+void GenerateTable::allocateReg(Register reg, int offset, AssemblyNode*& tail, bool isArray, bool needLoad) {
+    regUsed[reg.index] |= 1;
     if (isArray) {
         linkToTail(tail, new Mv(reg, Register(2)));
-        linkToTail(tail, new BinaryImmAssembly(reg, reg, ImmAssembly(abs(offset) + preservedOffset), "+"));
-    } else {
+        if (offset + preservedOffset > 0) {
+            linkToTail(tail, new BinaryImmAssembly(reg, reg, ImmAssembly(offset + preservedOffset), "+"));
+        }
+    } else if (needLoad) {
         linkToTail(tail, new Lw(reg, Register(2), ImmAssembly(offset + preservedOffset)));
     }
 }
 
-Register GenerateTable::allocateTemp(std::string ident, AssemblyNode*& tail) {
+Register GenerateTable::allocateTemp(std::string ident, AssemblyNode*& tail, bool needLoad) {
     if (identMap.find(ident) == identMap.end()) {
         if (spillParams.empty() || std::find(spillParams.begin(), spillParams.end(), ident) == spillParams.end()) {
             throw std::runtime_error("allocateTemp: Identifier " + ident + " not found in table");
         }
         identMap[ident] =
-            stackOffset + preservedOffset +
+            stackOffset +
             (std::find(spillParams.begin(), spillParams.end(), ident) - spillParams.begin()) * SIZE_OF_INT;
+    }
+    for (int i : TEMP_REGISTERS) {
+        if (registers[i] == ident) {
+            regUsed[i] = 0b11;
+            return Register(i);
+        }
     }
     for (int i : TEMP_REGISTERS) {
         if (registers[i].empty()) {
             registers[i] = ident;
             Register reg(i);
-            allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end());
+            allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end(), needLoad);
+            return reg;
+        }
+    }
+    for (int i : TEMP_REGISTERS) {
+        if ((regUsed[i] & 1) == 0) {
+            clear(Register(i), tail, regUsed[i] & 0b10);
+            registers[i] = ident;
+            Register reg(i);
+            allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end(), needLoad);
             return reg;
         }
     }
@@ -75,27 +93,34 @@ Register GenerateTable::allocateArg(std::string ident, AssemblyNode*& tail) {
         if (registers[i].empty()) {
             registers[i] = ident;
             Register reg(i);
-            allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end());
+            allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end(), false);
             return reg;
         }
     }
     // spill to stack
-    Register reg = allocateTemp(ident, tail);  // TODO: 最好能用a*寄存器
-    allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end());
+    Register reg = allocateTemp(ident, tail, false);  // TODO: 最好能用a*寄存器
+    allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end(), false);
     linkToTail(tail, new Sw(reg, Register(2), ImmAssembly(preservedUsed)));
     preservedUsed += SIZE_OF_INT;
     free(reg, tail, false);
     return Register(0);
 }
 
-void GenerateTable::free(Register reg, AssemblyNode*& tail, bool storeAddr) {
+void GenerateTable::free(Register reg, AssemblyNode*& tail, bool needStore) {
     int i = reg.index;
-    if (registers[i].empty()) {
+    if ((regUsed[i] & 1) == 0 || registers[i].empty()) {
         return;
     }
-    if (storeAddr) {
-        linkToTail(tail, new Sw(reg, Register(2), ImmAssembly(abs(identMap[registers[i]]))));
+    regUsed[i] |= needStore ? 0b10 : 0;  // set need store bit
+    regUsed[i] &= 0b10;                  // clear used bit
+}
+
+void GenerateTable::clear(Register reg, AssemblyNode*& tail, bool needStore) {
+    int i = reg.index;
+    if ((needStore || regUsed[i] & 0b10) && reg.name[0] == 't' && arraySet.find(registers[i]) == arraySet.end()) {
+        linkToTail(tail, new Sw(reg, Register(2), ImmAssembly(identMap[registers[i]] + preservedOffset)));
     }
+    regUsed[i] = 0;
     registers[i] = "";
 }
 
@@ -111,7 +136,7 @@ void GenerateTable::clearStack() {
 void LoadImm::print() { printToFile(immediateFile, "%s = #%d\n", ident.ident.c_str(), value.value); }
 
 void LoadImm::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register reg = table->allocateTemp(ident.ident, tail);
+    Register reg = table->allocateTemp(ident.ident, tail, false);
     linkToTail(tail, new Li(reg, ImmAssembly(value.value)));
     table->free(reg, tail, true);
 }
@@ -119,8 +144,8 @@ void LoadImm::generate(GenerateTable* table, AssemblyNode*& tail) {
 void Assign::print() { printToFile(immediateFile, "%s = %s\n", lhs.ident.c_str(), rhs.ident.c_str()); }
 
 void Assign::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register lhsReg = table->allocateTemp(lhs.ident, tail);
-    Register rhsReg = table->allocateTemp(rhs.ident, tail);
+    Register rhsReg = table->allocateTemp(rhs.ident, tail, true);
+    Register lhsReg = table->allocateTemp(lhs.ident, tail, false);
     linkToTail(tail, new Mv(lhsReg, rhsReg));
     table->free(lhsReg, tail, true);
     table->free(rhsReg, tail, false);
@@ -132,9 +157,9 @@ void Binop::print() {
 }
 
 void Binop::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register lhsReg = table->allocateTemp(lhs.ident, tail);
-    Register rhs1Reg = table->allocateTemp(rhs1.ident, tail);
-    Register rhs2Reg = table->allocateTemp(rhs2.ident, tail);
+    Register rhs1Reg = table->allocateTemp(rhs1.ident, tail, true);
+    Register rhs2Reg = table->allocateTemp(rhs2.ident, tail, true);
+    Register lhsReg = table->allocateTemp(lhs.ident, tail, false);
     linkToTail(tail, new BinaryAssembly(lhsReg, rhs1Reg, rhs2Reg, op));
     table->free(lhsReg, tail, true);
     table->free(rhs1Reg, tail, false);
@@ -146,8 +171,12 @@ void BinopImm::print() {
 }
 
 void BinopImm::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register lhsReg = table->allocateTemp(lhs.ident, tail);
-    Register rhsReg = table->allocateTemp(rhs.ident, tail);
+    if (imm.value == 0) {
+        Assign(lhs, rhs).generate(table, tail);
+        return;
+    }
+    Register rhsReg = table->allocateTemp(rhs.ident, tail, true);
+    Register lhsReg = table->allocateTemp(lhs.ident, tail, false);
     linkToTail(tail, new BinaryImmAssembly(lhsReg, rhsReg, ImmAssembly(imm.value), op));
     table->free(lhsReg, tail, true);
     table->free(rhsReg, tail, false);
@@ -156,8 +185,8 @@ void BinopImm::generate(GenerateTable* table, AssemblyNode*& tail) {
 void Unop::print() { printToFile(immediateFile, "%s = %s%s\n", lhs.ident.c_str(), op.c_str(), rhs.ident.c_str()); }
 
 void Unop::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register lhsReg = table->allocateTemp(lhs.ident, tail);
-    Register rhsReg = table->allocateTemp(rhs.ident, tail);
+    Register rhsReg = table->allocateTemp(rhs.ident, tail, true);
+    Register lhsReg = table->allocateTemp(lhs.ident, tail, false);
     switch (op[0]) {
         case '+':
             linkToTail(tail, new Mv(lhsReg, rhsReg));
@@ -175,8 +204,8 @@ void Unop::generate(GenerateTable* table, AssemblyNode*& tail) {
 void Load::print() { printToFile(immediateFile, "%s = *%s\n", lhs.ident.c_str(), rhs.ident.c_str()); }
 
 void Load::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register lhsReg = table->allocateTemp(lhs.ident, tail);
-    Register rhsReg = table->allocateTemp(rhs.ident, tail);
+    Register rhsReg = table->allocateTemp(rhs.ident, tail, true);
+    Register lhsReg = table->allocateTemp(lhs.ident, tail, false);
     linkToTail(tail, new Lw(lhsReg, rhsReg));
     table->free(lhsReg, tail, true);
     table->free(rhsReg, tail, false);
@@ -185,20 +214,32 @@ void Load::generate(GenerateTable* table, AssemblyNode*& tail) {
 void Store::print() { printToFile(immediateFile, "*%s = %s\n", lhs.ident.c_str(), rhs.ident.c_str()); }
 
 void Store::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register lhsReg = table->allocateTemp(lhs.ident, tail);
-    Register rhsReg = table->allocateTemp(rhs.ident, tail);
+    Register lhsReg = table->allocateTemp(lhs.ident, tail, true);
+    Register rhsReg = table->allocateTemp(rhs.ident, tail, true);
     linkToTail(tail, new Sw(rhsReg, lhsReg));
     table->free(lhsReg, tail, false);
     table->free(rhsReg, tail, false);
 }
 
+static void saveTemp(GenerateTable* table, AssemblyNode*& tail) {
+    for (int i : TEMP_REGISTERS) {
+        table->clear(Register(i), tail, false);
+    }
+}
+
 void Label::print() { printToFile(immediateFile, "LABEL %s:\n", name.c_str()); }
 
-void Label::generate(GenerateTable* table, AssemblyNode*& tail) { linkToTail(tail, new LabelAssembly(name)); }
+void Label::generate(GenerateTable* table, AssemblyNode*& tail) {
+    saveTemp(table, tail);
+    linkToTail(tail, new LabelAssembly(name));
+}
 
 void Goto::print() { printToFile(immediateFile, "GOTO %s\n", label.c_str()); }
 
-void Goto::generate(GenerateTable* table, AssemblyNode*& tail) { linkToTail(tail, new J(label)); }
+void Goto::generate(GenerateTable* table, AssemblyNode*& tail) {
+    saveTemp(table, tail);
+    linkToTail(tail, new J(label));
+}
 
 void CondGoto::print() {
     printToFile(immediateFile, "IF %s %s %s GOTO %s\n", lhs.ident.c_str(), op.c_str(), rhs.ident.c_str(),
@@ -206,8 +247,9 @@ void CondGoto::print() {
 }
 
 void CondGoto::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register lhsReg = table->allocateTemp(lhs.ident, tail);
-    Register rhsReg = table->allocateTemp(rhs.ident, tail);
+    Register lhsReg = table->allocateTemp(lhs.ident, tail, true);
+    Register rhsReg = table->allocateTemp(rhs.ident, tail, true);
+    saveTemp(table, tail);
     linkToTail(tail, new Branch(lhsReg, rhsReg, label, op));
     table->free(lhsReg, tail, false);
     table->free(rhsReg, tail, false);
@@ -233,6 +275,7 @@ void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
         table->insert("_ra", SIZE_OF_INT);
     }
 
+    prologueSize += table->getPreserved();
     linkToTail(tail, new LabelAssembly(name.ident));
     if (prologueSize > 0) {
         if (prologueSize > 2048) {
@@ -254,15 +297,16 @@ void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
 static void freeArgs(GenerateTable* table, AssemblyNode*& tail) {
     table->clearPreservedUsed();
     for (int i : ARG_REGISTERS) {
-        table->free(Register(i), tail, false);
+        table->clear(Register(i), tail, false);
     }
 }
 
 void CallWithRet::print() { printToFile(immediateFile, "%s = CALL %s\n", lhs.ident.c_str(), name.c_str()); }
 
 void CallWithRet::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register lhsReg = table->allocateTemp(lhs.ident, tail);
+    saveTemp(table, tail);
     linkToTail(tail, new CallAssembly(name));
+    Register lhsReg = table->allocateTemp(lhs.ident, tail, false);
     linkToTail(tail, new Mv(lhsReg, Register(10)));
     table->free(lhsReg, tail, true);
     freeArgs(table, tail);
@@ -271,6 +315,7 @@ void CallWithRet::generate(GenerateTable* table, AssemblyNode*& tail) {
 void Call::print() { printToFile(immediateFile, "CALL %s\n", name.c_str()); }
 
 void Call::generate(GenerateTable* table, AssemblyNode*& tail) {
+    saveTemp(table, tail);
     linkToTail(tail, new CallAssembly(name));
     freeArgs(table, tail);
 }
@@ -286,7 +331,7 @@ void Arg::generate(GenerateTable* table, AssemblyNode*& tail) {
     if (argReg.index == 0) {
         return;
     }
-    Register identReg = table->allocateTemp(ident.ident, tail);
+    Register identReg = table->allocateTemp(ident.ident, tail, true);
     linkToTail(tail, new Mv(argReg, identReg));
     table->free(identReg, tail, false);
 }
@@ -295,14 +340,18 @@ static void epilogue(GenerateTable* table, AssemblyNode*& tail) {
     if (table->identExists("_ra")) {
         linkToTail(tail, new Lw(Register(1), Register(2), table->getOffset("_ra")));
     }
-    linkToTail(tail, new BinaryImmAssembly(Register(2), Register(2), ImmAssembly(table->getStackOffset()), "+"));
+    if (table->getStackOffset() + table->getPreserved() > 0) {
+        linkToTail(tail, new BinaryImmAssembly(Register(2), Register(2),
+                                               ImmAssembly(table->getStackOffset() + table->getPreserved()), "+"));
+    }
 }
 
 void ReturnWithVal::print() { printToFile(immediateFile, "RETURN %s\n", ident.ident.c_str()); }
 
 void ReturnWithVal::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register retReg = table->allocateTemp(ident.ident, tail);
+    Register retReg = table->allocateTemp(ident.ident, tail, true);
     linkToTail(tail, new Mv(Register(10), retReg));
+    saveTemp(table, tail);
     epilogue(table, tail);
     linkToTail(tail, new Ret());
     table->free(retReg, tail, false);
@@ -311,6 +360,7 @@ void ReturnWithVal::generate(GenerateTable* table, AssemblyNode*& tail) {
 void Return::print() { printToFile(immediateFile, "RETURN\n"); }
 
 void Return::generate(GenerateTable* table, AssemblyNode*& tail) {
+    saveTemp(table, tail);
     epilogue(table, tail);
     linkToTail(tail, new Ret());
 }
@@ -329,7 +379,7 @@ void GlobalVar::generate(GenerateTable* table, AssemblyNode*& tail) {
 void LoadGlobal::print() { printToFile(immediateFile, "%s = &%s\n", lhs.ident.c_str(), rhs.ident.c_str()); }
 
 void LoadGlobal::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register lhsReg = table->allocateTemp(lhs.ident, tail);
+    Register lhsReg = table->allocateTemp(lhs.ident, tail, false);
     linkToTail(tail, new La(lhsReg, rhs.ident));
     table->free(lhsReg, tail, true);
 }

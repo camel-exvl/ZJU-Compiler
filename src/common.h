@@ -14,18 +14,18 @@ const int ARG_REGISTERS[] = {10, 11, 12, 13, 14, 15, 16, 17};
 const std::string TEXT =
     ".text\n\
 _minilib_start:\n\
-    la sp,_stack_top\n\
+    la sp, _stack_top\n\
     call main\n\
-    mv a1,a0\n\
-    li a0,17\n\
+    mv a1, a0\n\
+    li a0, 17\n\
     ecall\n\
 read:\n\
-    li a0,6\n\
+    li a0, 6\n\
     ecall\n\
     ret\n\
 write:\n\
-    mv a1,a0\n\
-    li a0,1\n\
+    mv a1, a0\n\
+    li a0, 1\n\
     ecall\n\
     ret\n";
 const std::string DATA =
