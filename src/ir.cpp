@@ -73,12 +73,14 @@ Register GenerateTable::allocateTemp(std::string ident, AssemblyNode*& tail, boo
             return reg;
         }
     }
-    for (int i : TEMP_REGISTERS) {
+    for (int index = (lastVictim + 1) % NUM_OF_TEMP_REG; index != lastVictim; index = (index + 1) % NUM_OF_TEMP_REG) {
+        int i = TEMP_REGISTERS[index];
         if ((regUsed[i] & 1) == 0) {
             clear(Register(i), tail, regUsed[i] & 0b10);
             registers[i] = ident;
             Register reg(i);
             allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end(), needLoad);
+            lastVictim = index;
             return reg;
         }
     }

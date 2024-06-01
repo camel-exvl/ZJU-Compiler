@@ -45,6 +45,7 @@ class GenerateTable {
     std::unordered_set<std::string> arraySet;
     std::string registers[32];
     int regUsed[32] = {0};  // low bit = 1 if register is used, high bit = 1 if register need sw
+    int lastVictim = 0; // last victim register index in TEMP_REGISTERS
 };
 
 class IRNode {
