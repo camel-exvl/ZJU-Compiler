@@ -10,6 +10,8 @@
 #include <vector>
 #include <stdexcept>
 
+class IRNode;
+class FuncDefNode;
 class GenerateTable {
    public:
     int insert(std::string ident, int size, bool storeAddr = false);  // storeAddr is true for local array
@@ -29,6 +31,12 @@ class GenerateTable {
 
     void insertGlobal(std::string ident) { globalSet.insert(ident); }
 
+    void insertLabel(std::string name, IRNode *label) { labelMap[name] = label; }
+    IRNode *getLabel(std::string name) { return labelMap[name]; }
+    void clearLabel() { labelMap.clear(); }
+
+    FuncDefNode *curFunction;
+
     int curParam;  // current function parameter count
     std::vector<std::string> spillParams;
     std::vector<std::string> params;
@@ -45,7 +53,8 @@ class GenerateTable {
     std::unordered_set<std::string> arraySet;
     std::string registers[32];
     int regUsed[32] = {0};  // low bit = 1 if register is used, high bit = 1 if register need sw
-    int lastVictim = 0; // last victim register index in TEMP_REGISTERS
+    int lastVictim = 0;     // last victim register index in TEMP_REGISTERS
+    std::unordered_map<std::string, IRNode *> labelMap;
 };
 
 class IRNode {
@@ -58,9 +67,39 @@ class IRNode {
     }
 
     virtual void print() { throw "IRNode::print() not implemented!"; }
+    virtual bool livenessAnalysis(GenerateTable *table) { return _livenessAnalysis(next); }
     virtual int prologue(GenerateTable *table) { return 0; }
     virtual void generate(GenerateTable *table, AssemblyNode *&tail) { throw "IRNode::generate() not implemented!"; }
     IRNode *next = nullptr;
+
+    // FIXME: FOR DEBUG
+    void printTest() {
+        std::printf("%s\n", typeid(*this).name());
+        // print use, def, in, out
+        std::printf("use: ");
+        for (auto &u : use) {
+            std::printf("%s ", u.c_str());
+        }
+        std::printf("\ndef: ");
+        for (auto &d : def) {
+            std::printf("%s ", d.c_str());
+        }
+        std::printf("\nin: ");
+        for (auto &i : in) {
+            std::printf("%s ", i.c_str());
+        }
+        std::printf("\nout: ");
+        for (auto &o : out) {
+            std::printf("%s ", o.c_str());
+        }
+        std::printf("\n\n");
+    }
+
+   protected:
+    std::unordered_set<std::string> use, def;
+    std::unordered_set<std::string> in, out;
+    bool _livenessAnalysis(IRNode *next);
+    bool _livenessAnalysis(IRNode *first, IRNode *second);
 };
 
 class Immediate {
@@ -77,7 +116,7 @@ class Identifier {
 
 class LoadImm : public IRNode {
    public:
-    LoadImm(Identifier ident, Immediate value) : ident(ident), value(value) {}
+    LoadImm(Identifier ident, Immediate value) : ident(ident), value(value) { def.emplace(ident.ident); }
     void print() override;
     int prologue(GenerateTable *table) override { return table->insert(ident.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
@@ -89,7 +128,10 @@ class LoadImm : public IRNode {
 
 class Assign : public IRNode {
    public:
-    Assign(Identifier lhs, Identifier rhs) : lhs(lhs), rhs(rhs) {}
+    Assign(Identifier lhs, Identifier rhs) : lhs(lhs), rhs(rhs) {
+        use.emplace(rhs.ident);
+        def.emplace(lhs.ident);
+    }
     void print() override;
     int prologue(GenerateTable *table) override { return table->insert(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
@@ -100,8 +142,11 @@ class Assign : public IRNode {
 
 class Binop : public IRNode {
    public:
-    Binop(Identifier lhs, Identifier rhs1, Identifier rhs2, std::string op)
-        : lhs(lhs), rhs1(rhs1), rhs2(rhs2), op(op) {}
+    Binop(Identifier lhs, Identifier rhs1, Identifier rhs2, std::string op) : lhs(lhs), rhs1(rhs1), rhs2(rhs2), op(op) {
+        use.emplace(rhs1.ident);
+        use.emplace(rhs2.ident);
+        def.emplace(lhs.ident);
+    }
     void print() override;
     int prologue(GenerateTable *table) override { return table->insert(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
@@ -113,7 +158,10 @@ class Binop : public IRNode {
 
 class BinopImm : public IRNode {
    public:
-    BinopImm(Identifier lhs, Identifier rhs, Immediate imm, std::string op) : lhs(lhs), rhs(rhs), imm(imm), op(op) {}
+    BinopImm(Identifier lhs, Identifier rhs, Immediate imm, std::string op) : lhs(lhs), rhs(rhs), imm(imm), op(op) {
+        use.emplace(rhs.ident);
+        def.emplace(lhs.ident);
+    }
     void print() override;
     int prologue(GenerateTable *table) override { return table->insert(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
@@ -126,7 +174,10 @@ class BinopImm : public IRNode {
 
 class Unop : public IRNode {
    public:
-    Unop(Identifier lhs, Identifier rhs, std::string op) : lhs(lhs), rhs(rhs), op(op) {}
+    Unop(Identifier lhs, Identifier rhs, std::string op) : lhs(lhs), rhs(rhs), op(op) {
+        use.emplace(rhs.ident);
+        def.emplace(lhs.ident);
+    }
     void print() override;
     int prologue(GenerateTable *table) override { return table->insert(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
@@ -138,7 +189,10 @@ class Unop : public IRNode {
 
 class Load : public IRNode {
    public:
-    Load(Identifier lhs, Identifier rhs) : lhs(lhs), rhs(rhs) {}
+    Load(Identifier lhs, Identifier rhs) : lhs(lhs), rhs(rhs) {
+        use.emplace(rhs.ident);
+        def.emplace(lhs.ident);
+    }
     void print() override;
     int prologue(GenerateTable *table) override { return table->insert(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
@@ -149,7 +203,10 @@ class Load : public IRNode {
 
 class Store : public IRNode {
    public:
-    Store(Identifier lhs, Identifier rhs) : lhs(lhs), rhs(rhs) {}
+    Store(Identifier lhs, Identifier rhs) : lhs(lhs), rhs(rhs) {
+        use.emplace(lhs.ident);
+        use.emplace(rhs.ident);
+    }
     void print() override;
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
@@ -163,6 +220,8 @@ class Label : public IRNode {
     void print() override;
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
+    std::string getName() { return name; }
+
    private:
     std::string name;
 };
@@ -171,6 +230,7 @@ class Goto : public IRNode {
    public:
     Goto(std::string label) : label(label) {}
     void print() override;
+    bool livenessAnalysis(GenerateTable *table) override { return _livenessAnalysis(table->getLabel(label)); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -180,8 +240,12 @@ class Goto : public IRNode {
 class CondGoto : public IRNode {
    public:
     CondGoto(Identifier lhs, Identifier rhs, std::string op, std::string label)
-        : lhs(lhs), rhs(rhs), op(op), label(label) {}
+        : lhs(lhs), rhs(rhs), op(op), label(label) {
+        use.emplace(lhs.ident);
+        use.emplace(rhs.ident);
+    }
     void print() override;
+    bool livenessAnalysis(GenerateTable *table) override { return _livenessAnalysis(next, table->getLabel(label)); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -195,15 +259,20 @@ class FuncDefNode : public IRNode {
     void print() override;
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
+    Identifier getName() { return name; }
+
    private:
     Identifier name;
 };
 
 class CallWithRet : public IRNode {
    public:
-    CallWithRet(Identifier lhs, std::string name, int argCount) : lhs(lhs), name(name), argCount(argCount) {}
+    CallWithRet(Identifier lhs, std::string name, int argCount) : lhs(lhs), name(name), argCount(argCount) {
+        def.emplace(lhs.ident);
+    }
     void print() override;
     int prologue(GenerateTable *table) override { return table->insert(lhs.ident, SIZE_OF_INT); }
+    bool livenessAnalysis(GenerateTable *table) override;
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -220,6 +289,7 @@ class Call : public IRNode {
         table->preservedOffsetCurCall = 0;
         return std::max(0, argCount - 8) * SIZE_OF_INT;
     }
+    bool livenessAnalysis(GenerateTable *table) override;
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -229,7 +299,7 @@ class Call : public IRNode {
 
 class Param : public IRNode {
    public:
-    Param(Identifier ident) : ident(ident) {}
+    Param(Identifier ident) : ident(ident) { def.emplace(ident.ident); }
     void print() override;
     int prologue(GenerateTable *table) override {
         ++table->curParam;
@@ -249,7 +319,7 @@ class Param : public IRNode {
 
 class Arg : public IRNode {
    public:
-    Arg(Identifier ident) : ident(ident) {}
+    Arg(Identifier ident) : ident(ident) { use.emplace(ident.ident); }
     void print() override;
     int prologue(GenerateTable *table) override {
         ++table->preservedOffsetCurCall;
@@ -266,8 +336,9 @@ class Arg : public IRNode {
 
 class ReturnWithVal : public IRNode {
    public:
-    ReturnWithVal(Identifier ident) : ident(ident) {}
+    ReturnWithVal(Identifier ident) : ident(ident) { use.emplace(ident.ident); }
     void print() override;
+    bool livenessAnalysis(GenerateTable *table) override { return _livenessAnalysis(nullptr); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -278,12 +349,13 @@ class Return : public IRNode {
    public:
     Return() {}
     void print() override;
+    bool livenessAnalysis(GenerateTable *table) override { return _livenessAnalysis(nullptr); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 };
 
 class VarDec : public IRNode {
    public:
-    VarDec(Identifier ident, Immediate size) : ident(ident), size(size) {}
+    VarDec(Identifier ident, Immediate size) : ident(ident), size(size) { def.emplace(ident.ident); }
     void print() override;
     int prologue(GenerateTable *table) override { return table->insert(ident.ident, size.value, true); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
@@ -305,7 +377,7 @@ class GlobalVar : public IRNode {
 
 class LoadGlobal : public IRNode {
    public:
-    LoadGlobal(Identifier lhs, Identifier rhs) : lhs(lhs), rhs(rhs) {}
+    LoadGlobal(Identifier lhs, Identifier rhs) : lhs(lhs), rhs(rhs) { def.emplace(lhs.ident); }
     void print() override;
     int prologue(GenerateTable *table) override { return table->insert(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;

@@ -135,6 +135,36 @@ void GenerateTable::clearStack() {
     arraySet.clear();
 }
 
+bool IRNode::_livenessAnalysis(IRNode* next) {
+    std::unordered_set<std::string> newOut = next ? next->in : std::unordered_set<std::string>();
+    std::unordered_set<std::string> newIn;
+    std::set_difference(newOut.begin(), newOut.end(), def.begin(), def.end(), std::inserter(newIn, newIn.begin()));
+    std::set_union(use.begin(), use.end(), newIn.begin(), newIn.end(), std::inserter(newIn, newIn.begin()));
+    if (newIn != in || newOut != out) {
+        in = newIn;
+        out = newOut;
+        return true;
+    }
+    return false;
+}
+
+bool IRNode::_livenessAnalysis(IRNode* first, IRNode* second) {
+    std::unordered_set<std::string> newOut = first ? first->in : std::unordered_set<std::string>();
+    if (second) {
+        std::set_union(newOut.begin(), newOut.end(), second->in.begin(), second->in.end(),
+                       std::inserter(newOut, newOut.begin()));
+    }
+    std::unordered_set<std::string> newIn;
+    std::set_difference(newOut.begin(), newOut.end(), def.begin(), def.end(), std::inserter(newIn, newIn.begin()));
+    std::set_union(use.begin(), use.end(), newIn.begin(), newIn.end(), std::inserter(newIn, newIn.begin()));
+    if (newIn != in || newOut != out) {
+        in = newIn;
+        out = newOut;
+        return true;
+    }
+    return false;
+}
+
 void LoadImm::print() { printToFile(immediateFile, "%s = #%d\n", ident.ident.c_str(), value.value); }
 
 void LoadImm::generate(GenerateTable* table, AssemblyNode*& tail) {
@@ -260,6 +290,29 @@ void CondGoto::generate(GenerateTable* table, AssemblyNode*& tail) {
 void FuncDefNode::print() { printToFile(immediateFile, "FUNCTION %s:\n", name.ident.c_str()); }
 
 void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
+    // liveness analysis
+    table->clearLabel();
+    table->curFunction = this;
+    std::vector<IRNode*> nodes;
+    for (IRNode* cur = this->next; cur != nullptr; cur = cur->next) {
+        if (typeid(*cur) == typeid(FuncDefNode)) {
+            break;
+        } else if (typeid(*cur) == typeid(Label)) {
+            table->insertLabel(dynamic_cast<Label*>(cur)->getName(), cur);
+        }
+        nodes.push_back(cur);
+    }
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto cur = nodes.rbegin(); cur != nodes.rend(); cur++) {
+            changed |= (*cur)->livenessAnalysis(table);
+        }
+    }
+    // FIXME: test
+    for (auto cur : nodes) {
+        cur->printTest();
+    }
     // prologue
     table->clearStack();
     table->curParam = 0;
@@ -314,12 +367,28 @@ void CallWithRet::generate(GenerateTable* table, AssemblyNode*& tail) {
     freeArgs(table, tail);
 }
 
+bool CallWithRet::livenessAnalysis(GenerateTable* table) {
+    if (name == table->curFunction->getName().ident) {
+        return _livenessAnalysis(table->curFunction->next, next);
+    } else {
+        return _livenessAnalysis(next);
+    }
+}
+
 void Call::print() { printToFile(immediateFile, "CALL %s\n", name.c_str()); }
 
 void Call::generate(GenerateTable* table, AssemblyNode*& tail) {
     saveTemp(table, tail);
     linkToTail(tail, new CallAssembly(name));
     freeArgs(table, tail);
+}
+
+bool Call::livenessAnalysis(GenerateTable* table) {
+    if (name == table->curFunction->getName().ident) {
+        return _livenessAnalysis(table->curFunction->next, next);
+    } else {
+        return _livenessAnalysis(next);
+    }
 }
 
 void Param::print() { printToFile(immediateFile, "PARAM %s\n", ident.ident.c_str()); }
