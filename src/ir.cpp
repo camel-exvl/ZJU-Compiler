@@ -27,13 +27,13 @@ static void linkToTail(AssemblyNode*& tail, AssemblyNode* target) {
 }
 
 int GenerateTable::insert(std::string ident, int size, bool storeAddr) {
-    if (identMap.find(ident) != identMap.end()) {
+    if (identStack.find(ident) != identStack.end()) {
         return 0;
     }
     if (storeAddr) {
         arraySet.insert(ident);
     }
-    identMap[ident] = stackOffset;
+    identStack[ident] = stackOffset;
     stackOffset += size;
     return size;
 }
@@ -51,57 +51,73 @@ void GenerateTable::allocateReg(Register reg, int offset, AssemblyNode*& tail, b
 }
 
 Register GenerateTable::allocateTemp(std::string ident, AssemblyNode*& tail, bool needLoad) {
-    if (identMap.find(ident) == identMap.end()) {
+    if (identRegMap.find(ident) != identRegMap.end() && identRegMap[ident] != -1) {
+        if (spillParams.empty() || std::find(spillParams.begin(), spillParams.end(), ident) == spillParams.end()) {
+            return Register(identRegMap[ident]);
+        }
+    }
+    if (identStack.find(ident) == identStack.end()) {
         if (spillParams.empty() || std::find(spillParams.begin(), spillParams.end(), ident) == spillParams.end()) {
             throw std::runtime_error("allocateTemp: Identifier " + ident + " not found in table");
         }
-        identMap[ident] =
+        identStack[ident] =
             stackOffset +
             (std::find(spillParams.begin(), spillParams.end(), ident) - spillParams.begin()) * SIZE_OF_INT;
     }
-    for (int i : TEMP_REGISTERS) {
-        if (registers[i] == ident) {
-            regUsed[i] = 0b11;
-            return Register(i);
-        }
+    if (registers[8].empty()) {
+        registers[8] = ident;
+        Register reg(8);
+        allocateReg(reg, identStack[ident], tail, arraySet.find(ident) != arraySet.end(), needLoad);
+        return reg;
     }
-    for (int i : TEMP_REGISTERS) {
-        if (registers[i].empty()) {
-            registers[i] = ident;
-            Register reg(i);
-            allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end(), needLoad);
-            return reg;
-        }
-    }
-    for (int index = (lastVictim + 1) % NUM_OF_TEMP_REG; index != lastVictim; index = (index + 1) % NUM_OF_TEMP_REG) {
-        int i = TEMP_REGISTERS[index];
-        if ((regUsed[i] & 1) == 0) {
-            clear(Register(i), tail, regUsed[i] & 0b10);
-            registers[i] = ident;
-            Register reg(i);
-            allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end(), needLoad);
-            lastVictim = index;
-            return reg;
-        }
-    }
+    // for (int i : TEMP_REGISTERS) {
+    //     if (registers[i] == ident) {
+    //         regUsed[i] = 0b11;
+    //         return Register(i);
+    //     }
+    // }
+    // for (int i : TEMP_REGISTERS) {
+    //     if (registers[i].empty()) {
+    //         registers[i] = ident;
+    //         Register reg(i);
+    //         allocateReg(reg, identStack[ident], tail, arraySet.find(ident) != arraySet.end(), needLoad);
+    //         return reg;
+    //     }
+    // }
+    // for (int index = (lastVictim + 1) % NUM_OF_TEMP_REG; index != lastVictim; index = (index + 1) % NUM_OF_TEMP_REG) {
+    //     int i = TEMP_REGISTERS[index];
+    //     if ((regUsed[i] & 1) == 0) {
+    //         clear(Register(i), tail, regUsed[i] & 0b10);
+    //         registers[i] = ident;
+    //         Register reg(i);
+    //         allocateReg(reg, identStack[ident], tail, arraySet.find(ident) != arraySet.end(), needLoad);
+    //         lastVictim = index;
+    //         return reg;
+    //     }
+    // }
     throw std::runtime_error("No available register");
 }
 
 Register GenerateTable::allocateArg(std::string ident, AssemblyNode*& tail) {
-    if (identMap.find(ident) == identMap.end()) {
+    if (identStack.find(ident) == identStack.end() && identRegMap.find(ident) == identRegMap.end()) {
         throw std::runtime_error("allocateArg: Identifier " + ident + " not found in table");
     }
     for (int i : ARG_REGISTERS) {
         if (registers[i].empty()) {
             registers[i] = ident;
             Register reg(i);
-            allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end(), false);
+            if (identRegMap.find(ident) != identRegMap.end()) {
+                regUsed[i] |= 1;
+                linkToTail(tail, new Mv(reg, Register(identRegMap[ident])));
+            } else {
+                allocateReg(reg, identStack[ident], tail, arraySet.find(ident) != arraySet.end(), false);
+            }
             return reg;
         }
     }
     // spill to stack
     Register reg = allocateTemp(ident, tail, false);  // TODO: 最好能用a*寄存器
-    allocateReg(reg, identMap[ident], tail, arraySet.find(ident) != arraySet.end(), false);
+    allocateReg(reg, identStack[ident], tail, arraySet.find(ident) != arraySet.end(), false);
     linkToTail(tail, new Sw(reg, Register(2), ImmAssembly(preservedUsed)));
     preservedUsed += SIZE_OF_INT;
     free(reg, tail, false);
@@ -120,7 +136,7 @@ void GenerateTable::free(Register reg, AssemblyNode*& tail, bool needStore) {
 void GenerateTable::clear(Register reg, AssemblyNode*& tail, bool needStore) {
     int i = reg.index;
     if ((needStore || regUsed[i] & 0b10) && reg.name[0] == 't' && arraySet.find(registers[i]) == arraySet.end()) {
-        linkToTail(tail, new Sw(reg, Register(2), ImmAssembly(identMap[registers[i]] + preservedOffset)));
+        linkToTail(tail, new Sw(reg, Register(2), ImmAssembly(identStack[registers[i]] + preservedOffset)));
     }
     regUsed[i] = 0;
     registers[i] = "";
@@ -129,7 +145,7 @@ void GenerateTable::clear(Register reg, AssemblyNode*& tail, bool needStore) {
 void GenerateTable::clearStack() {
     stackOffset = 0;
     preservedOffset = 0;
-    identMap.clear();
+    identStack.clear();
     spillParams.clear();
     params.clear();
     arraySet.clear();
@@ -289,11 +305,79 @@ void CondGoto::generate(GenerateTable* table, AssemblyNode*& tail) {
 
 void FuncDefNode::print() { printToFile(immediateFile, "FUNCTION %s:\n", name.ident.c_str()); }
 
+static int linearScan(GenerateTable* table, std::vector<IRNode*>& nodes) {
+    int size = 0;
+    table->intervals.clear();
+    for (int i = 0; i < (int)nodes.size(); ++i) {
+        for (auto ident : nodes[i]->out) {
+            if (table->intervals.find(ident) == table->intervals.end()) {
+                table->intervals[ident] = VarInterval(ident, i, i + 1);
+            } else {
+                table->intervals[ident].end = i + 1;
+            }
+        }
+    }
+    std::vector<VarInterval> live;
+    std::map<VarInterval, int, std::greater<VarInterval>> active;
+    std::unordered_set<int> freeRegisters;
+    for (int i = 0; i < NUM_OF_TEMP_REG; i++) {
+        freeRegisters.insert(TEMP_REGISTERS[i]);
+    }
+    for (auto interval : table->intervals) {
+        live.emplace_back(interval.second);
+    }
+
+    table->clearIdentReg();
+    std::sort(live.begin(), live.end());
+    for (auto i : live) {
+        std::printf("%s %d---%d\n", i.ident.c_str(), i.start, i.end);
+    }
+
+    for (auto i : live) {
+        // expire old intervals
+        for (auto j = active.begin(); j != active.end();) {
+            if (j->first.end >= i.start) {
+                break;
+            }
+            freeRegisters.insert(j->second);
+            table->insertIdentReg(j->first.ident, j->second);
+            j = active.erase(j);
+        }
+
+        if (active.size() == NUM_OF_TEMP_REG) {
+            // spill
+            auto spill = active.begin();
+            if (spill->first.end > i.end) {
+                int reg = spill->second;
+                table->insertIdentReg(spill->first.ident, -1);
+                size += table->insert(spill->first.ident, SIZE_OF_INT, false);
+                active.erase(spill);
+                active[i] = reg;
+            } else {
+                table->insertIdentReg(i.ident, -1);
+                size += table->insert(i.ident, SIZE_OF_INT, false);
+            }
+        } else {
+            int reg = *freeRegisters.begin();
+            freeRegisters.erase(reg);
+            active[i] = reg;
+        }
+    }
+    for (auto i : active) {
+        table->insertIdentReg(i.first.ident, i.second);
+    }
+    table->printTest();
+    return size;
+}
+
 void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
+    table->clearStack();
+    int prologueSize;
+
     // liveness analysis
     table->clearLabel();
-    table->curFunction = this;
     std::vector<IRNode*> nodes;
+    int index = 0;
     for (IRNode* cur = this->next; cur != nullptr; cur = cur->next) {
         if (typeid(*cur) == typeid(FuncDefNode)) {
             break;
@@ -301,6 +385,7 @@ void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
             table->insertLabel(dynamic_cast<Label*>(cur)->getName(), cur);
         }
         nodes.push_back(cur);
+        cur->index = index++;
     }
     bool changed = true;
     while (changed) {
@@ -309,14 +394,10 @@ void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
             changed |= (*cur)->livenessAnalysis(table);
         }
     }
-    // FIXME: test
-    for (auto cur : nodes) {
-        cur->printTest();
-    }
+    prologueSize = linearScan(table, nodes);
+
     // prologue
-    table->clearStack();
     table->curParam = 0;
-    int prologueSize = 0;
     bool foundCall = false;
     for (IRNode* cur = this->next; cur != nullptr; cur = cur->next) {
         if (typeid(*cur) == typeid(FuncDefNode)) {
@@ -329,6 +410,9 @@ void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
         prologueSize += SIZE_OF_INT;
         table->insert("_ra", SIZE_OF_INT);
     }
+    prologueSize += SIZE_OF_INT;
+    table->insert("_s0", SIZE_OF_INT);
+    table->curParam = 0;
 
     prologueSize += table->getPreserved();
     linkToTail(tail, new LabelAssembly(name.ident));
@@ -342,6 +426,7 @@ void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
     if (foundCall) {
         linkToTail(tail, new Sw(Register(1), Register(2), table->getOffset("_ra")));
     }
+    linkToTail(tail, new Sw(Register(8), Register(2), table->getOffset("_s0")));
 
     // save arguments
     for (int i = 0; i < std::min(table->curParam, 8); i++) {
@@ -360,40 +445,62 @@ void CallWithRet::print() { printToFile(immediateFile, "%s = CALL %s\n", lhs.ide
 
 void CallWithRet::generate(GenerateTable* table, AssemblyNode*& tail) {
     saveTemp(table, tail);
+
+    // save temp
+    for (auto i : regToSave) {
+        std::printf("SAVE %s on %s\n", i.first.c_str(), REGISTER_NAMES[i.second].c_str());
+        linkToTail(tail, new Sw(Register(i.second), Register(2), table->getOffset(i.first)));
+    }
+
     linkToTail(tail, new CallAssembly(name));
+
+    // load temp
+    for (auto i : regToSave) {
+        std::printf("LOAD %s on %s\n", i.first.c_str(), REGISTER_NAMES[i.second].c_str());
+        linkToTail(tail, new Lw(Register(i.second), Register(2), table->getOffset(i.first)));
+    }
+
     Register lhsReg = table->allocateTemp(lhs.ident, tail, false);
     linkToTail(tail, new Mv(lhsReg, Register(10)));
     table->free(lhsReg, tail, true);
     freeArgs(table, tail);
 }
 
-bool CallWithRet::livenessAnalysis(GenerateTable* table) {
-    if (name == table->curFunction->getName().ident) {
-        return _livenessAnalysis(table->curFunction->next, next);
-    } else {
-        return _livenessAnalysis(next);
-    }
-}
-
 void Call::print() { printToFile(immediateFile, "CALL %s\n", name.c_str()); }
 
 void Call::generate(GenerateTable* table, AssemblyNode*& tail) {
     saveTemp(table, tail);
-    linkToTail(tail, new CallAssembly(name));
-    freeArgs(table, tail);
-}
 
-bool Call::livenessAnalysis(GenerateTable* table) {
-    if (name == table->curFunction->getName().ident) {
-        return _livenessAnalysis(table->curFunction->next, next);
-    } else {
-        return _livenessAnalysis(next);
+    // save temp
+    for (auto i : regToSave) {
+        linkToTail(tail, new Sw(Register(i.second), Register(2), table->getOffset(i.first)));
     }
+
+    linkToTail(tail, new CallAssembly(name));
+
+    // load temp
+    for (auto i : regToSave) {
+        linkToTail(tail, new Lw(Register(i.second), Register(2), table->getOffset(i.first)));
+    }
+
+    freeArgs(table, tail);
 }
 
 void Param::print() { printToFile(immediateFile, "PARAM %s\n", ident.ident.c_str()); }
 
-void Param::generate(GenerateTable* table, AssemblyNode*& tail) {}
+void Param::generate(GenerateTable* table, AssemblyNode*& tail) {
+    ++table->curParam;
+    if (table->getIdentReg(ident.ident) != -1) {
+        if (table->curParam < 8) {  // a0-a7
+            linkToTail(tail, new Mv(Register(table->getIdentReg(ident.ident)), Register(table->curParam + 9)));
+        } else {  // stack
+            Register reg = table->allocateTemp(ident.ident, tail, false);
+            linkToTail(tail, new Lw(reg, Register(2), table->getOffset(ident.ident)));
+            linkToTail(tail, new Mv(table->allocateArg(ident.ident, tail), reg));
+            table->free(reg, tail, false);
+        }
+    }
+}
 
 void Arg::print() { printToFile(immediateFile, "ARG %s\n", ident.ident.c_str()); }
 
@@ -402,12 +509,15 @@ void Arg::generate(GenerateTable* table, AssemblyNode*& tail) {
     if (argReg.index == 0) {
         return;
     }
-    Register identReg = table->allocateTemp(ident.ident, tail, true);
-    linkToTail(tail, new Mv(argReg, identReg));
-    table->free(identReg, tail, false);
+    // Register identReg = table->allocateTemp(ident.ident, tail, true);
+    // linkToTail(tail, new Mv(argReg, identReg));
+    // table->free(identReg, tail, false);
 }
 
 static void epilogue(GenerateTable* table, AssemblyNode*& tail) {
+    if (table->identExists("_s0")) {
+        linkToTail(tail, new Lw(Register(8), Register(2), table->getOffset("_s0")));
+    }
     if (table->identExists("_ra")) {
         linkToTail(tail, new Lw(Register(1), Register(2), table->getOffset("_ra")));
     }
