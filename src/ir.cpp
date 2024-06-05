@@ -36,6 +36,11 @@ int GenerateTable::insertStack(std::string ident, int size) {
     return size;
 }
 
+int GenerateTable::getStackOffset(std::string ident) {
+    assert(identStackOffset.find(ident) != identStackOffset.end());
+    return stackOffset - identStackOffset[ident];
+}
+
 Register GenerateTable::allocateReg(std::string ident, AssemblyNode*& tail, bool needLoad) {
     // if already allocated
     if (identReg.find(ident) != identReg.end()) {
@@ -43,10 +48,10 @@ Register GenerateTable::allocateReg(std::string ident, AssemblyNode*& tail, bool
             assert(identStackOffset.find(ident) != identStackOffset.end());
             if (arraySet.find(ident) != arraySet.end()) {
                 linkToTail(tail, new BinaryImmAssembly(Register(identReg[ident]), Register(2),
-                                                       ImmAssembly(identStackOffset[ident]), "+"));
+                                                       ImmAssembly(getStackOffset(ident)), "+"));
 
             } else {
-                linkToTail(tail, new Lw(Register(identReg[ident]), Register(2), identStackOffset[ident]));
+                linkToTail(tail, new Lw(Register(identReg[ident]), Register(2), getStackOffset(ident)));
             }
         }
         regState[identReg[ident]] = true;
@@ -54,15 +59,17 @@ Register GenerateTable::allocateReg(std::string ident, AssemblyNode*& tail, bool
     }
 
     // variable is spilled
-    assert(identStackOffset.find(ident) != identStackOffset.end());
+    if (identStackOffset.find(ident) == identStackOffset.end()) {  // the ident is not used
+        return Register(0);
+    }
     for (auto i : TEMP_REGISTERS) {
         if (!regState[i]) {
             regState[i] = true;
             if (arraySet.find(ident) != arraySet.end()) {
                 linkToTail(tail,
-                           new BinaryImmAssembly(Register(i), Register(2), ImmAssembly(identStackOffset[ident]), "+"));
+                           new BinaryImmAssembly(Register(i), Register(2), ImmAssembly(getStackOffset(ident)), "+"));
             } else {
-                linkToTail(tail, new Lw(Register(i), Register(2), identStackOffset[ident]));
+                linkToTail(tail, new Lw(Register(i), Register(2), getStackOffset(ident)));
             }
             return Register(i);
         }
@@ -75,7 +82,7 @@ void GenerateTable::free(std::string ident, Register reg, AssemblyNode*& tail, b
     if (std::find(TEMP_REGISTERS.begin(), TEMP_REGISTERS.end(), reg.index) != TEMP_REGISTERS.end()) {
         if (needStore) {
             assert(identStackOffset.find(ident) != identStackOffset.end());
-            linkToTail(tail, new Sw(reg, Register(2), identStackOffset[ident]));
+            linkToTail(tail, new Sw(reg, Register(2), getStackOffset(ident)));
         }
         regState[reg.index] = false;
     }
@@ -246,19 +253,24 @@ static void linearScan(GenerateTable* table, std::vector<IRNode*>& nodes, FuncDe
         }
     }
 
-    std::vector<VarInterval> live;
+    table->live.clear();
     std::map<VarInterval, int, std::greater<VarInterval>> active;
     std::unordered_set<int> freeRegisters;
     for (auto i : SAVED_REGISTERS) {
         freeRegisters.insert(i);
     }
     for (auto interval : table->varIntervals) {
-        live.emplace_back(interval.second);
+        table->live.emplace_back(interval.second);
     }
-    std::sort(live.begin(), live.end());
+    std::sort(table->live.begin(), table->live.end());
 
     // allocate registers
-    for (auto i : live) {
+    for (auto i : table->live) {
+        // if already allocated(such as function arguments)
+        if (table->identReg.find(i.ident) != table->identReg.end()) {
+            continue;
+        }
+
         // expire old intervals
         for (auto j = active.begin(); j != active.end();) {
             if (j->first.end >= i.start) {
@@ -292,15 +304,14 @@ static void linearScan(GenerateTable* table, std::vector<IRNode*>& nodes, FuncDe
 }
 
 void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
-    // liveness analysis
+    // init
     table->identStackOffset.clear();
     table->identReg.clear();
-    std::vector<IRNode*> nodes;
-    livenessAnalysisFunc(table, nodes, this);
-    linearScan(table, nodes, this);
+    table->arraySet.clear();
+    table->curParamCount = 0;
+    table->regState = std::vector<bool>(NUM_OF_REG, false);
 
     // prologue
-    table->arraySet.clear();
     for (IRNode* cur = this->next; cur != nullptr; cur = cur->next) {
         if (typeid(*cur) == typeid(FuncDefNode)) {
             break;
@@ -309,30 +320,102 @@ void FuncDefNode::generate(GenerateTable* table, AssemblyNode*& tail) {
     }
     table->insertStack("_ra", SIZE_OF_INT);
 
+    // liveness analysis
+    std::vector<IRNode*> nodes;
+    livenessAnalysisFunc(table, nodes, this);
+    linearScan(table, nodes, this);
+
+    // set size for stack of saved registers
+    std::unordered_set<int> savedRegs;
+    for (auto i : table->identReg) {
+        if (std::find(SAVED_REGISTERS.begin(), SAVED_REGISTERS.end(), i.second) != SAVED_REGISTERS.end() &&
+            savedRegs.find(i.second) == savedRegs.end()) {
+            savedRegs.emplace(i.second);
+            table->insertStack("_" + REGISTER_NAMES[i.second], SIZE_OF_INT);
+        }
+    }
+
+    // set call node's save context size
+    for (auto cur : nodes) {
+        if (typeid(*cur) == typeid(Call) || typeid(*cur) == typeid(CallWithRet)) {
+            static_cast<CallNode*>(cur)->saveContextSize(table);
+        }
+    }
+
+    // generate assembly
     linkToTail(tail, new LabelAssembly(name.ident));
     if (table->stackOffset > 2048) {
         throw std::runtime_error("TODO: prologue size too large");
     } else {
         linkToTail(tail, new BinaryImmAssembly(Register(2), Register(2), ImmAssembly(-table->stackOffset), "+"));
     }
+    // sw
+    linkToTail(tail, new Sw(Register(1), Register(2), table->getStackOffset("_ra")));
+    for (auto i : savedRegs) {
+        linkToTail(tail, new Sw(Register(i), Register(2), table->getStackOffset("_" + REGISTER_NAMES[i])));
+    }
+}
 
-    linkToTail(tail, new Sw(Register(1), Register(2), table->identStackOffset["_ra"]));
+int CallNode::saveContextSize(GenerateTable* table) {
+    int size = 0;
+    for (auto i : table->live) {
+        if (i.ident == lhs.ident) {
+            continue;
+        }
+        if (i.start < index && i.end > index) {
+            if (table->identReg.find(i.ident) != table->identReg.end()) {
+                savedIdent.emplace_back(i.ident);
+                size += table->insertStack(i.ident, SIZE_OF_INT);
+            }
+        }
+    }
+    return size;
+}
+
+void CallNode::saveContext(GenerateTable* table, AssemblyNode*& tail) {
+    for (auto i : savedIdent) {
+        if (i == lhs.ident) {
+            continue;
+        }
+        Register reg = table->allocateReg(i, tail, true);
+        linkToTail(tail, new Sw(reg, Register(2), table->getStackOffset(i)));
+        table->free(i, reg, tail, false);
+    }
+}
+
+void CallNode::loadContext(GenerateTable* table, AssemblyNode*& tail) {
+    for (auto i : savedIdent) {
+        if (i == lhs.ident) {
+            continue;
+        }
+        Register reg = table->allocateReg(i, tail, false);
+        linkToTail(tail, new Lw(reg, Register(2), table->getStackOffset(i)));
+        table->free(i, reg, tail, true);
+    }
 }
 
 void CallWithRet::print() { printToFile(immediateFile, "%s = CALL %s\n", lhs.ident.c_str(), name.c_str()); }
 
 void CallWithRet::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register lhsReg = table->allocateReg(lhs.ident, tail, false);
+    if (table->curArgCount == 0) {
+        saveContext(table, tail);
+    }
     linkToTail(tail, new CallAssembly(name));
+    Register lhsReg = table->allocateReg(lhs.ident, tail, false);
     linkToTail(tail, new Mv(lhsReg, Register(10)));
     table->free(lhs.ident, lhsReg, tail, true);
     table->curArgCount = 0;
+    loadContext(table, tail);
 }
 
 void Call::print() { printToFile(immediateFile, "CALL %s\n", name.c_str()); }
 
 void Call::generate(GenerateTable* table, AssemblyNode*& tail) {
+    if (table->curArgCount == 0) {
+        saveContext(table, tail);
+    }
     linkToTail(tail, new CallAssembly(name));
+    loadContext(table, tail);
     table->curArgCount = 0;
 }
 
@@ -343,9 +426,18 @@ void Param::generate(GenerateTable* table, AssemblyNode*& tail) {}
 void Arg::print() { printToFile(immediateFile, "ARG %s\n", ident.ident.c_str()); }
 
 void Arg::generate(GenerateTable* table, AssemblyNode*& tail) {
-    Register argReg = table->allocateReg(ident.ident, tail, true);
     table->curArgCount++;
+    if (table->curArgCount == 1) {
+        // save context
+        for (auto cur = this->next; cur != nullptr; cur = cur->next) {
+            if (typeid(*cur) == typeid(Call) || typeid(*cur) == typeid(CallWithRet)) {
+                static_cast<CallNode*>(cur)->saveContext(table, tail);
+                break;
+            }
+        }
+    }
     if (table->curArgCount <= 8) {
+        Register argReg = table->allocateReg(ident.ident, tail, true);
         linkToTail(tail, new Mv(Register(table->curArgCount + 9), argReg));
     } else {
         // TODO:
@@ -353,7 +445,16 @@ void Arg::generate(GenerateTable* table, AssemblyNode*& tail) {
 }
 
 static void epilogue(GenerateTable* table, AssemblyNode*& tail) {
-    linkToTail(tail, new Lw(Register(1), Register(2), table->identStackOffset["_ra"]));  // ra
+    std::unordered_set<int> savedRegs;
+    for (auto i : table->identReg) {
+        if (std::find(SAVED_REGISTERS.begin(), SAVED_REGISTERS.end(), i.second) != SAVED_REGISTERS.end() &&
+            savedRegs.find(i.second) == savedRegs.end()) {
+            savedRegs.emplace(i.second);
+            linkToTail(tail,
+                       new Lw(Register(i.second), Register(2), table->getStackOffset("_" + REGISTER_NAMES[i.second])));
+        }
+    }
+    linkToTail(tail, new Lw(Register(1), Register(2), table->getStackOffset("_ra")));  // ra
     linkToTail(tail, new BinaryImmAssembly(Register(2), Register(2), ImmAssembly(table->stackOffset), "+"));
 }
 

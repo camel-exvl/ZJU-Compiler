@@ -30,23 +30,25 @@ class VarInterval {
 class GenerateTable {
    public:
     int insertStack(std::string ident, int size);
+    int getStackOffset(std::string ident);
     Register allocateReg(std::string ident, AssemblyNode *&tail, bool needLoad);
     void free(std::string ident, Register reg, AssemblyNode *&tail, bool needStore);
 
     int curArgCount = 0;
+    int curParamCount = 0;
     int stackOffset = 0;
     std::unordered_map<std::string, int> identStackOffset;  // ident -> stack offset
     std::unordered_map<std::string, int> identReg;          // ident -> register index
     std::unordered_set<std::string> arraySet;               // arrays
     std::vector<bool> regState = std::vector<bool>(
-        NUM_OF_REG, false);  // register index -> is clean for saved registers, is used for temp registers
+        NUM_OF_REG, false);  // register index -> is hold value for saved registers, is used for temp registers
     std::unordered_map<std::string, IRNode *> labelMap;         // label -> IRNode
     std::unordered_map<std::string, VarInterval> varIntervals;  // ident -> VarInterval
+    std::vector<VarInterval> live;                              // live intervals in the current function
 };
 
 class IRNode {
    public:
-    IRNode() {}
     virtual ~IRNode() {
         if (next != this) {
             delete next;
@@ -84,7 +86,6 @@ class LoadImm : public IRNode {
    public:
     LoadImm(Identifier ident, Immediate value) : ident(ident), value(value) { def.emplace(ident.ident); }
     void print() override;
-    int prologue(GenerateTable *table) override { return table->insertStack(ident.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -99,7 +100,6 @@ class Assign : public IRNode {
         use.emplace(rhs.ident);
     }
     void print() override;
-    int prologue(GenerateTable *table) override { return table->insertStack(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -114,7 +114,6 @@ class Binop : public IRNode {
         use.emplace(rhs2.ident);
     }
     void print() override;
-    int prologue(GenerateTable *table) override { return table->insertStack(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -129,7 +128,6 @@ class BinopImm : public IRNode {
         use.emplace(rhs.ident);
     }
     void print() override;
-    int prologue(GenerateTable *table) override { return table->insertStack(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -145,7 +143,6 @@ class Unop : public IRNode {
         use.emplace(rhs.ident);
     }
     void print() override;
-    int prologue(GenerateTable *table) override { return table->insertStack(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -160,7 +157,6 @@ class Load : public IRNode {
         use.emplace(rhs.ident);
     }
     void print() override;
-    int prologue(GenerateTable *table) override { return table->insertStack(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -229,19 +225,30 @@ class FuncDefNode : public IRNode {
     Identifier name;
 };
 
-class CallWithRet : public IRNode {
+class CallNode : public IRNode {
    public:
-    CallWithRet(Identifier lhs, std::string name) : lhs(lhs), name(name) { def.emplace(lhs.ident); }
+    CallNode() : lhs("") {}
+    CallNode(Identifier lhs) : lhs(lhs) { def.emplace(lhs.ident); }
+    int saveContextSize(GenerateTable *table);
+    void saveContext(GenerateTable *table, AssemblyNode *&tail);
+    void loadContext(GenerateTable *table, AssemblyNode *&tail);
+
+   protected:
+    Identifier lhs;
+    std::vector<std::string> savedIdent;
+};
+
+class CallWithRet : public CallNode {
+   public:
+    CallWithRet(Identifier lhs, std::string name) : CallNode(lhs), name(name) {}
     void print() override;
-    int prologue(GenerateTable *table) override { return table->insertStack(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
-    Identifier lhs;
     std::string name;
 };
 
-class Call : public IRNode {
+class Call : public CallNode {
    public:
     Call(std::string name) : name(name) {}
     void print() override;
@@ -256,9 +263,10 @@ class Param : public IRNode {
     Param(Identifier ident) : ident(ident) { def.emplace(ident.ident); }
     void print() override;
     int prologue(GenerateTable *table) override {
-        ++table->curArgCount;
-        if (table->curArgCount <= 8) {
-            table->identReg[ident.ident] = ARG_REGISTERS[table->curArgCount - 1];
+        ++table->curParamCount;
+        if (table->curParamCount <= 8) {
+            table->identReg[ident.ident] = ARG_REGISTERS[table->curParamCount - 1];
+            table->regState[ARG_REGISTERS[table->curParamCount - 1]] = true;
             return 0;
         } else {
             // TODO:
@@ -329,7 +337,6 @@ class LoadGlobal : public IRNode {
    public:
     LoadGlobal(Identifier lhs, Identifier rhs) : lhs(lhs), rhs(rhs) {}
     void print() override;
-    int prologue(GenerateTable *table) override { return table->insertStack(lhs.ident, SIZE_OF_INT); }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
