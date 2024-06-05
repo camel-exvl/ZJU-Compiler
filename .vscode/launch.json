@@ -17,7 +17,7 @@
 			"type": "cppdbg",
 			"request": "launch",
 			"program": "${workspaceFolder}/compiler",
-			"args": ["${workspaceFolder}/tests/lab4/while_if.sy"],
+			"args": ["${workspaceFolder}/tests/lab4/more_args.sy"],
 			"stopAtEntry": false,
 			"cwd": "${fileDirname}",
 			"environment": [],

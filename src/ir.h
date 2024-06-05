@@ -37,6 +37,7 @@ class GenerateTable {
     int curArgCount = 0;
     int curParamCount = 0;
     int stackOffset = 0;
+    int curStackPreserve = 0;                               // preserve for call with more than 8 arguments
     std::unordered_map<std::string, int> identStackOffset;  // ident -> stack offset
     std::unordered_map<std::string, int> identReg;          // ident -> register index
     std::unordered_set<std::string> arraySet;               // arrays
@@ -242,6 +243,10 @@ class CallWithRet : public CallNode {
    public:
     CallWithRet(Identifier lhs, std::string name) : CallNode(lhs), name(name) {}
     void print() override;
+    int prologue(GenerateTable *table) override {
+        table->curArgCount = 0;
+        return 0;
+    }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -252,6 +257,10 @@ class Call : public CallNode {
    public:
     Call(std::string name) : name(name) {}
     void print() override;
+    int prologue(GenerateTable *table) override {
+        table->curArgCount = 0;
+        return 0;
+    }
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -262,17 +271,7 @@ class Param : public IRNode {
    public:
     Param(Identifier ident) : ident(ident) { def.emplace(ident.ident); }
     void print() override;
-    int prologue(GenerateTable *table) override {
-        ++table->curParamCount;
-        if (table->curParamCount <= 8) {
-            table->identReg[ident.ident] = ARG_REGISTERS[table->curParamCount - 1];
-            table->regState[ARG_REGISTERS[table->curParamCount - 1]] = true;
-            return 0;
-        } else {
-            // TODO:
-        }
-        return 0;
-    }
+    int prologue(GenerateTable *table) override;
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
@@ -283,6 +282,7 @@ class Arg : public IRNode {
    public:
     Arg(Identifier ident) : ident(ident) { use.emplace(ident.ident); }
     void print() override;
+    int prologue(GenerateTable *table) override;
     void generate(GenerateTable *table, AssemblyNode *&tail) override;
 
    private:
