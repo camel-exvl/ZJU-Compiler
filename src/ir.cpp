@@ -281,6 +281,7 @@ void FuncDefNode::print() { printToFile(immediateFile, "FUNCTION %s:\n", name.id
 
 static void livenessAnalysisFunc(GenerateTable *table, std::vector<IRNode *> &nodes, FuncDefNode *func) {
     table->labelMap.clear();
+    nodes.clear();
     int index = 0;
     for (IRNode *cur = func->next; cur != nullptr; cur = cur->next) {
         if (typeid(*cur) == typeid(FuncDefNode)) {
@@ -290,6 +291,8 @@ static void livenessAnalysisFunc(GenerateTable *table, std::vector<IRNode *> &no
             table->labelMap[static_cast<Label *>(cur)->getName()] = cur;
         }
         cur->index = index++;
+        cur->in.clear();
+        cur->out.clear();
         nodes.push_back(cur);
     }
 
@@ -299,6 +302,37 @@ static void livenessAnalysisFunc(GenerateTable *table, std::vector<IRNode *> &no
         for (int i = nodes.size() - 1; i >= 0; i--) {
             changed |= nodes[i]->livenessAnalysis(table);
         }
+    }
+
+    // check if there is useless IRNode (def is not in out)
+    changed = false;
+    for (auto i = 0ull; i < nodes.size(); ++i) {
+        if (nodes[i]->def.empty() || typeid(*nodes[i]) == typeid(Param) || typeid(*nodes[i]) == typeid(CallWithRet)) {
+            continue;
+        }
+        bool useless = true;
+        for (auto j : nodes[i]->def) {
+            if (nodes[i]->out.find(j) != nodes[i]->out.end()) {
+                useless = false;
+                break;
+            }
+        }
+        if (useless) {
+            IRNode *cur = nodes[i];
+            nodes.erase(nodes.begin() + i);
+            if (i > 0) {
+                nodes[i - 1]->next = cur->next;
+            } else {
+                func->next = cur->next;
+            }
+            cur->next = nullptr;
+            delete cur;
+            --i;
+            changed = true;
+        }
+    }
+    if (changed) {
+        livenessAnalysisFunc(table, nodes, func);
     }
 }
 
@@ -376,8 +410,12 @@ void FuncDefNode::generate(GenerateTable *table, AssemblyNode *&tail) {
     table->regState = std::vector<short>(NUM_OF_REG, 0);
     table->tempReg = std::vector<std::string>(TEMP_REGISTERS.size(), "");
 
+    // liveness analysis
+    std::vector<IRNode *> nodes;
+    livenessAnalysisFunc(table, nodes, this);
+
     // prologue
-    for (IRNode *cur = this->next; cur != nullptr; cur = cur->next) {
+    for (IRNode *cur : nodes) {
         if (typeid(*cur) == typeid(FuncDefNode)) {
             break;
         }
@@ -385,12 +423,10 @@ void FuncDefNode::generate(GenerateTable *table, AssemblyNode *&tail) {
     }
     table->insertStack("_ra", SIZE_OF_INT);
 
-    // liveness analysis
-    std::vector<IRNode *> nodes;
-    livenessAnalysisFunc(table, nodes, this);
+    // linear scan
     linearScan(table, nodes, this);
 
-    // set size for stack of saved registers
+    // set size for stack of saved registers at the beginning of the function
     std::unordered_set<int> savedRegs;
     for (auto i : table->identReg) {
         if (std::find(SAVED_REGISTERS.begin(), SAVED_REGISTERS.end(), i.second) != SAVED_REGISTERS.end() &&
