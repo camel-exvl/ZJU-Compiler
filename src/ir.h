@@ -33,6 +33,7 @@ class GenerateTable {
     int getStackOffset(std::string ident);
     Register allocateReg(std::string ident, AssemblyNode *&tail, bool needLoad);
     void free(std::string ident, Register reg, AssemblyNode *&tail, bool needStore);
+    void clear(Register reg, AssemblyNode *&tail);
 
     int curArgCount = 0;
     int curParamCount = 0;
@@ -41,8 +42,10 @@ class GenerateTable {
     std::unordered_map<std::string, int> identStackOffset;  // ident -> stack offset
     std::unordered_map<std::string, int> identReg;          // ident -> register index
     std::unordered_set<std::string> arraySet;               // arrays
-    std::vector<bool> regState = std::vector<bool>(
-        NUM_OF_REG, false);  // register index -> is hold value for saved registers, is used for temp registers
+    std::vector<short> regState = std::vector<short>(
+        NUM_OF_REG, 0);  // register index -> is dirty | is used (is dirty bit only used in temp registers)
+    std::vector<std::string> tempReg =
+        std::vector<std::string>(TEMP_REGISTERS.size(), "");    // ident stored in temp registers
     std::unordered_map<std::string, IRNode *> labelMap;         // label -> IRNode
     std::unordered_map<std::string, VarInterval> varIntervals;  // ident -> VarInterval
     std::vector<VarInterval> live;                              // live intervals in the current function

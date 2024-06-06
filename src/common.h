@@ -7,10 +7,10 @@
 const int SIZE_OF_INT = 4;
 const int NUM_OF_REG = 32;
 const std::vector<std::string> REGISTER_NAMES = {"zero", "ra", "sp", "gp", "tp",  "t0",  "t1", "t2", "s0", "s1", "a0",
-                                      "a1",   "a2", "a3", "a4", "a5",  "a6",  "a7", "s2", "s3", "s4", "s5",
-                                      "s6",   "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"};
+                                                 "a1",   "a2", "a3", "a4", "a5",  "a6",  "a7", "s2", "s3", "s4", "s5",
+                                                 "s6",   "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"};
 const std::vector<int> TEMP_REGISTERS = {5, 6, 7, 28, 29, 30, 31};
-const std::vector<int> SAVED_REGISTERS = {9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27};
+const std::vector<int> SAVED_REGISTERS = {8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27};
 const std::vector<int> ARG_REGISTERS = {10, 11, 12, 13, 14, 15, 16, 17};
 
 const std::string TEXT =

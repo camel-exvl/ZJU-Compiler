@@ -17,7 +17,7 @@
 			"type": "cppdbg",
 			"request": "launch",
 			"program": "${workspaceFolder}/compiler",
-			"args": ["${workspaceFolder}/tests/lab4/more_args.sy"],
+			"args": ["${workspaceFolder}/tests/lab4/add.sy"],
 			"stopAtEntry": false,
 			"cwd": "${fileDirname}",
 			"environment": [],
