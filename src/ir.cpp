@@ -90,7 +90,7 @@ Register GenerateTable::allocateReg(std::string ident, AssemblyNode *&tail, bool
         }
     }
     // spill
-    for (auto i = 0ull; i < TEMP_REGISTERS.size(); ++i) {
+    for (auto i = (lastVictim + 1) % TEMP_REGISTERS.size(); i != lastVictim; i = (i + 1) % TEMP_REGISTERS.size()) {
         int reg = TEMP_REGISTERS[i];
         if ((regState[reg] & 1) == 0) {
             clear(Register(reg), tail);
@@ -104,6 +104,7 @@ Register GenerateTable::allocateReg(std::string ident, AssemblyNode *&tail, bool
                     linkToTail(tail, new Lw(Register(reg), Register(2), getStackOffset(ident)));
                 }
             }
+            lastVictim = i;
             return Register(reg);
         }
     }

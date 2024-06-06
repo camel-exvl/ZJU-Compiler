@@ -39,6 +39,7 @@ class GenerateTable {
     int curParamCount = 0;
     int stackOffset = 0;
     int curStackPreserve = 0;                               // preserve for call with more than 8 arguments
+    unsigned int lastVictim = 0;                            // last victim register index in TEMP_REGISTERS
     std::unordered_map<std::string, int> identStackOffset;  // ident -> stack offset
     std::unordered_map<std::string, int> identReg;          // ident -> register index
     std::unordered_set<std::string> arraySet;               // arrays
