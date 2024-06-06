@@ -73,7 +73,9 @@ Register GenerateTable::allocateReg(std::string ident, AssemblyNode *&tail, bool
                 linkToTail(tail,
                            new BinaryImmAssembly(Register(i), Register(2), ImmAssembly(getStackOffset(ident)), "+"));
             } else {
-                linkToTail(tail, new Lw(Register(i), Register(2), getStackOffset(ident)));
+                if (needLoad) {
+                    linkToTail(tail, new Lw(Register(i), Register(2), getStackOffset(ident)));
+                }
             }
             return Register(i);
         }
