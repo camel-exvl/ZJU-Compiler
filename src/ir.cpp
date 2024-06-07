@@ -465,7 +465,10 @@ int CallNode::saveContextSize(GenerateTable *table) {
             continue;
         }
         if (i.start < index && i.end > index) {
-            if (table->identReg.find(i.ident) != table->identReg.end()) {
+            // only save registers that need caller to save
+            if (table->identReg.find(i.ident) != table->identReg.end() &&
+                std::find(SAVED_REGISTERS.begin(), SAVED_REGISTERS.end(), table->identReg[i.ident]) ==
+                    SAVED_REGISTERS.end()) {
                 savedIdent.emplace_back(i.ident);
                 size += table->insertStack(i.ident, SIZE_OF_INT);
             }
