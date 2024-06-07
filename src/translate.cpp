@@ -497,10 +497,20 @@ void BinaryExp::translateExp(SymbolTable* table, std::string& place, bool ignore
 }
 
 void RelExp::translateCond(SymbolTable* table, std::string trueLabel, std::string falseLabel, IRNode*& tail) {
-    std::string left = table->newTemp();
-    std::string right = table->newTemp();
+    std::string left = "";
+    std::string right = "";
     lhs_->translateExp(table, left, false, tail);
+    if (left[0] == '*') {
+        std::string temp = table->newTemp();
+        linkToTail(tail, new Load(Identifier(temp), Identifier(left.substr(1))));
+        left = temp;
+    }
     rhs_->translateExp(table, right, false, tail);
+    if (right[0] == '*') {
+        std::string temp = table->newTemp();
+        linkToTail(tail, new Load(Identifier(temp), Identifier(right.substr(1))));
+        right = temp;
+    }
     linkToTail(tail, new CondGoto(Identifier(left), Identifier(right), op_, trueLabel));
     linkToTail(tail, new Goto(falseLabel));
 }
